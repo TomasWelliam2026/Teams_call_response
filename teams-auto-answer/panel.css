@@ -1,0 +1,91 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1f1f1f;
+  --muted: #5f6368;
+  --line: #dadce0;
+  --field: #f8f9fa;
+  --accent: #188038;
+  --danger: #c5221f;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202124;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --line: #3c4043;
+    --field: #2a2b2e;
+    --accent: #34a853;
+    --danger: #f28b82;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  min-width: 280px;
+  margin: 0;
+  padding: 12px 14px 14px;
+  font: 13px/1.4 system-ui, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+h1 { font-size: 15px; margin: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }
+small, .hint { color: var(--muted); font-weight: normal; text-transform: none; letter-spacing: 0; }
+
+.switch { display: flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
+.switch input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+.actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 12px; }
+button {
+  font: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--field); color: var(--fg);
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); }
+button.link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; }
+.status { min-height: 1.4em; margin: 6px 0 0; color: var(--muted); }
+
+label { display: block; margin: 8px 0 3px; }
+label.check { display: flex; gap: 6px; align-items: center; }
+input[type=text], input[type=number], input[type=time], select, textarea {
+  font: inherit; width: 100%; padding: 4px 6px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--field); color: var(--fg);
+}
+textarea { resize: vertical; }
+.row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.row label { margin: 0; flex: 1; }
+.row select, .row input[type=number] { width: 110px; }
+.row input[type=time] { width: 110px; }
+.hours[hidden] { display: none; }
+.days { display: flex; gap: 4px; }
+.days label { margin: 0; display: flex; flex-direction: column; align-items: center; font-size: 11px; color: var(--muted); }
+
+.bridge-status { display: flex; align-items: center; gap: 6px; margin: 8px 0 2px; color: var(--muted); }
+.bridge-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); flex: none; }
+.bridge-status[data-state=waiting] .dot, .bridge-status[data-state=connecting] .dot,
+.bridge-status[data-state=reconnecting] .dot { background: #f9ab00; }
+.bridge-status[data-state=live] { color: var(--fg); font-weight: 600; }
+.bridge-status[data-state=live] .dot { background: var(--accent); }
+.bridge-status[data-state=error] { color: var(--danger); }
+.bridge-status[data-state=error] .dot { background: var(--danger); }
+
+.shortcuts { list-style: none; padding: 0; margin: 0 0 6px; }
+.shortcuts li { display: flex; justify-content: space-between; padding: 2px 0; }
+kbd { font: 11px ui-monospace, monospace; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; }
+
+details { margin-top: 14px; }
+summary { cursor: pointer; color: var(--muted); }
+details input[type=text] { font-family: ui-monospace, monospace; font-size: 12px; }
+details button { margin-top: 10px; }
+.diagnosis {
+  white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto;
+  background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: 6px; font-size: 11px;
+}
+
+.log { list-style: none; padding: 0; margin: 0; max-height: 150px; overflow: auto; }
+.log li { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.log time { color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.log .detail { color: var(--muted); display: block; font-size: 11px; }

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mock-teams",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["teams-auto-answer/test/serve.js", "8765"],
+      "port": 8765
+    },
+    {
+      "name": "bridge-server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["-e", "process.env.BRIDGE_TOKEN ||= 'local-dev-token-not-secret'; process.env.PORT = '8787'; process.env.FALLBACK ||= 'echo'; require('./server/server.js')"],
+      "port": 8787
+    }
+  ]
+}

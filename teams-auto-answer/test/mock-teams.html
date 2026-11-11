@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mock Teams Calls</title>
+  <!-- Like the extension's "world: MAIN, document_start" script: loaded before any page code.
+       The fake caller keeps the unpatched RTCPeerConnection so only the "Teams" side is tapped. -->
+  <script>window.__NativePC = window.RTCPeerConnection;</script>
+  <script src="../page-audio.js"></script>
+  <style>
+    :root { --bg: #f5f5f5; --fg: #242424; --card: #fff; --line: #ddd; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #1f1f1f; --fg: #eee; --card: #2b2b2b; --line: #444; } }
+    body { margin: 0; padding: 16px; font: 14px system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; max-width: 420px; }
+    .toast { position: fixed; right: 16px; bottom: 16px; width: 320px; background: var(--card); border: 1px solid var(--line);
+      border-radius: 10px; padding: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.25); }
+    .toast + .toast { bottom: 150px; }
+    .toast .btns { display: flex; gap: 8px; margin-top: 10px; }
+    #events { font: 12px ui-monospace, monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Mock Teams incoming calls</h1>
+  <p>Test page for the extension's content script. It uses a mock of the <code>chrome.*</code> APIs instead of a real extension.</p>
+  <div class="controls">
+    <button id="ringA">Ring: Jane Doe (Fluent-style toast)</button>
+    <button id="ringB">Ring: Bob Smith (text-only toast)</button>
+    <button id="stop">Stop ringing</button>
+    <button id="hangup">Hang up call</button>
+  </div>
+  <p>Answering starts a WebRTC loopback call: the caller sends a 440 Hz tone, the local mic is 220 Hz.
+    With the bridge on and an echo server, the caller should hear 440 Hz (their echo) instead of 220 Hz.
+    <code>await __callerHears()</code> reports what the caller receives.</p>
+
+  <!-- Decoys: must never be clicked by the extension. -->
+  <div class="card" id="invite">
+    <strong>Weekly sync</strong> — Thursday 10:00
+    <div><button id="decoyAccept">Accept</button> <button>Tentative</button> <button id="decoyDecline">Decline</button></div>
+  </div>
+  <div class="card" id="chat">
+    <strong>Chat</strong>: “Can you accept the file I sent?”
+    <div><button id="decoyFile" aria-label="Accept file">Accept</button></div>
+  </div>
+
+  <h2>Events</h2>
+  <div id="events"></div>
+
+  <script>
+    const events = document.getElementById('events');
+    const logEvent = (s) => { events.textContent += `${new Date().toLocaleTimeString()}  ${s}\n`; };
+    window.__clicks = [];
+
+    function attach(toast, caller) {
+      toast.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+        const what = b.getAttribute('aria-label') || b.textContent;
+        window.__clicks.push({ caller, button: what });
+        logEvent(`CLICKED "${what}" on call from ${caller}`);
+        toast.remove();
+        if (!/decline/i.test(what)) startCall(caller);
+      }));
+      document.body.append(toast);
+      logEvent(`Ringing: ${caller}`);
+    }
+
+    function ringFluent(caller) {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.setAttribute('role', 'alertdialog');
+      t.setAttribute('data-tid', 'call-toast');
+      t.setAttribute('aria-label', `Incoming call from ${caller}`);
+      t.innerHTML = `<div><strong>${caller}</strong><div>Incoming audio call</div></div>
+        <div class="btns">
+          <button aria-label="Accept with video" data-tid="call-accept-video">📹</button>
+          <button aria-label="Accept with audio" data-tid="call-accept-audio">📞</button>
+          <button aria-label="Decline call" data-tid="call-decline">✕</button>
+        </div>`;
+      attach(t, caller);
+    }
+
+    function ringText(caller) {
+      const t = document.createElement('div');
+      t.className = 'toast';
+      t.innerHTML = `<div><strong>${caller}</strong> is calling you</div>
+        <div class="btns"><button>Accept</button><button>Decline</button></div>`;
+      attach(t, caller);
+    }
+
+    document.getElementById('ringA').onclick = () => ringFluent('Jane Doe');
+    document.getElementById('ringB').onclick = () => ringText('Bob Smith');
+    document.getElementById('stop').onclick = () => { document.querySelectorAll('.toast').forEach(t => t.remove()); logEvent('Stopped ringing'); };
+    for (const id of ['decoyAccept', 'decoyDecline', 'decoyFile']) {
+      document.getElementById(id).addEventListener('click', () => { window.__clicks.push({ decoy: id }); logEvent(`DECOY CLICKED: ${id}`); });
+    }
+    // ---- Fake call: "Teams" peer (patched RTCPeerConnection) <-> caller peer (native) ----
+    let call = null;
+    function tone(ctx, hz) {
+      const osc = new OscillatorNode(ctx, { frequency: hz });
+      const dest = ctx.createMediaStreamDestination();
+      osc.connect(new GainNode(ctx, { gain: 0.3 })).connect(dest);
+      osc.start();
+      return dest.stream;
+    }
+    async function startCall(caller) {
+      hangup();
+      const ctx = new AudioContext();
+      await ctx.resume();
+      const teams = new RTCPeerConnection();        // what Teams would create (tapped by page-audio.js)
+      const remote = new window.__NativePC();        // the far end of the call
+      teams.onicecandidate = (e) => e.candidate && remote.addIceCandidate(e.candidate);
+      remote.onicecandidate = (e) => e.candidate && teams.addIceCandidate(e.candidate);
+      const mic = tone(ctx, 220);
+      teams.addTrack(mic.getAudioTracks()[0], mic);
+      const voice = tone(ctx, 440);
+      remote.addTrack(voice.getAudioTracks()[0], voice);
+      const analyser = new AnalyserNode(ctx, { fftSize: 2048, smoothingTimeConstant: 0 });
+      remote.ontrack = (e) => {
+        const stream = new MediaStream([e.track]);
+        const el = new Audio(); el.muted = true; el.srcObject = stream; el.play().catch(() => {});
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        call.el = el;
+      };
+      teams.ontrack = (e) => { const el = new Audio(); el.muted = true; el.srcObject = new MediaStream([e.track]); el.play().catch(() => {}); };
+      call = { ctx, teams, remote, analyser };
+      const offer = await teams.createOffer();
+      await teams.setLocalDescription(offer);
+      await remote.setRemoteDescription(offer);
+      const answer = await remote.createAnswer();
+      await remote.setLocalDescription(answer);
+      await teams.setRemoteDescription(answer);
+      logEvent(`Call connected with ${caller}`);
+    }
+    function hangup() {
+      if (!call) return;
+      call.teams.close();
+      call.remote.close();
+      call.ctx.close();
+      call = null;
+      logEvent('Call hung up');
+    }
+    /** Level (dB) of 220 Hz (local mic) and 440 Hz (caller's echo) in what the caller receives. */
+    window.__callerHears = async () => {
+      if (!call) return null;
+      await new Promise(r => setTimeout(r, 300));
+      const bins = new Float32Array(call.analyser.frequencyBinCount);
+      call.analyser.getFloatFrequencyData(bins);
+      const at = (hz) => Math.round(bins[Math.round(hz / (call.ctx.sampleRate / call.analyser.fftSize))]);
+      return { mic220: at(220), echo440: at(440), state: call.teams.connectionState };
+    };
+    document.getElementById('hangup').onclick = hangup;
+    window.__hangup = hangup;
+    window.__ringFluent = ringFluent;
+    window.__ringText = ringText;
+    window.addEventListener('mock-bg', (e) => logEvent(`→ background: ${JSON.stringify(e.detail)}`));
+  </script>
+  <script src="chrome-shim.js"></script>
+  <script src="../detector.js"></script>
+  <script src="../bridge.js"></script>
+  <script src="../content.js"></script>
+</body>
+</html>

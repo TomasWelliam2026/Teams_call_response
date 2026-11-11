@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Teams Call Answerer</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header>
+    <h1>Teams Call Answerer</h1>
+    <label class="switch" title="Auto-answer">
+      <input type="checkbox" id="enabled">
+      <span>Auto-answer</span>
+    </label>
+  </header>
+
+  <section class="actions">
+    <button data-action="audio" class="primary">Answer (audio)</button>
+    <button data-action="video">Answer (video)</button>
+    <button data-action="decline" class="danger">Decline</button>
+  </section>
+  <p id="status" class="status" role="status"></p>
+
+  <section>
+    <h2>Audio bridge</h2>
+    <label class="check"><input type="checkbox" id="bridgeEnabled"> Stream answered calls to my server</label>
+    <p class="hint">After a call is answered, the caller's audio goes to the server and the server's audio is sent to the caller in place of your microphone.</p>
+    <label for="serverUrl">Server URL</label>
+    <input type="text" id="serverUrl" placeholder="wss://bridge.example.com/call" spellcheck="false" autocomplete="off">
+    <label for="bridgeToken">Access token</label>
+    <input type="password" id="bridgeToken" autocomplete="off" spellcheck="false">
+    <label class="check"><input type="checkbox" id="bridgeKeepMic"> Also send my microphone</label>
+    <div class="bridge-status" id="bridgeStatus" data-state="idle">
+      <span class="dot"></span><span id="bridgeText">Idle</span>
+    </div>
+    <div class="row">
+      <button id="bridgeTest">Test connection</button>
+      <button id="bridgeStop" class="danger">Stop bridge</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Auto-answer rules</h2>
+    <div class="row">
+      <label for="mode">Answer with</label>
+      <select id="mode">
+        <option value="audio">Audio only</option>
+        <option value="video">Video</option>
+      </select>
+    </div>
+    <div class="row">
+      <label for="delaySec">Ring for (seconds)</label>
+      <input type="number" id="delaySec" min="0" max="60" step="1">
+    </div>
+    <label for="allowlist">Only these callers <small>(one per line, empty = anyone)</small></label>
+    <textarea id="allowlist" rows="2" placeholder="Jane Doe"></textarea>
+    <label for="blocklist">Never auto-answer <small>(one per line)</small></label>
+    <textarea id="blocklist" rows="2"></textarea>
+
+    <label class="check"><input type="checkbox" id="hoursEnabled"> Only during active hours</label>
+    <div id="hours" class="hours">
+      <div class="row">
+        <input type="time" id="hoursStart" aria-label="Start time"> –
+        <input type="time" id="hoursEnd" aria-label="End time">
+      </div>
+      <div class="days" id="days"></div>
+    </div>
+
+    <label class="check"><input type="checkbox" id="notify"> Notify me when a call is auto-answered</label>
+    <label class="check"><input type="checkbox" id="keepAlive"> Keep Teams tabs from being put to sleep</label>
+  </section>
+
+  <section>
+    <h2>Shortcuts <small>(work in any app)</small></h2>
+    <ul id="shortcuts" class="shortcuts"></ul>
+    <button id="editShortcuts" class="link">Change shortcuts…</button>
+  </section>
+
+  <details>
+    <summary>Advanced: button detection</summary>
+    <p class="hint">Regex overrides for a non-English Teams UI or after a Teams redesign. Leave empty for defaults.</p>
+    <label for="customContext">Incoming-call text</label>
+    <input type="text" id="customContext" spellcheck="false">
+    <label for="customAcceptAudio">Accept audio button</label>
+    <input type="text" id="customAcceptAudio" spellcheck="false">
+    <label for="customAcceptVideo">Accept video button</label>
+    <input type="text" id="customAcceptVideo" spellcheck="false">
+    <label for="customAccept">Generic accept button</label>
+    <input type="text" id="customAccept" spellcheck="false">
+    <label for="customDecline">Decline button</label>
+    <input type="text" id="customDecline" spellcheck="false">
+    <button id="diagnose">Scan Teams tab now</button>
+    <pre id="diagnosis" class="diagnosis" hidden></pre>
+  </details>
+
+  <section>
+    <h2>Recent activity</h2>
+    <ol id="log" class="log"></ol>
+  </section>
+
+  <script src="detector.js"></script>
+  <script src="bridge.js"></script>
+  <script src="panel.js"></script>
+</body>
+</html>

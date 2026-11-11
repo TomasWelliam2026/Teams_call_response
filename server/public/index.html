@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Call Bridge Console</title>
+  <link rel="stylesheet" href="console.css">
+</head>
+<body>
+  <main>
+    <h1>Call Bridge Console</h1>
+    <p class="muted">Answered Teams calls appear here. Take one to hear the caller and talk through your microphone.</p>
+
+    <form id="login">
+      <label for="token">Operator token</label>
+      <div class="row">
+        <input type="password" id="token" autocomplete="current-password" required>
+        <button type="submit" class="primary">Connect</button>
+      </div>
+    </form>
+
+    <p id="status" class="status" role="status">Not connected.</p>
+
+    <section id="active" hidden>
+      <h2>On call</h2>
+      <div class="card live">
+        <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
+        <div class="row">
+          <button id="mute">Mute</button>
+          <button id="release">Release</button>
+          <button id="handBack" class="danger" title="Stop the bridge; the person at the Teams computer gets the call back">Hand back to Teams user</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="callsSection" hidden>
+      <h2>Live calls</h2>
+      <ul id="calls" class="calls"></ul>
+    </section>
+  </main>
+  <script src="console.js"></script>
+</body>
+</html>
