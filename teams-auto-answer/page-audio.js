@@ -12,12 +12,14 @@
   const FRAME = 320;             // 20 ms at 16 kHz
   const ARM_TIMEOUT_MS = 30000;  // after "answer", wait this long for call audio to appear
   const PREFER_NEW_MS = 3000;     // after "answer", prefer a connection that wasn't already up this long
+  const RECENT_MS = 2000;         // a connection that came up this shortly before "answer" counts as new
   const START_BUFFER_S = 0.08;   // playback jitter buffer for server audio
   const MAX_AHEAD_S = 0.6;       // drop server audio that would queue beyond this (keeps latency bounded)
 
   const NativePC = window.RTCPeerConnection;
   const nativeReplaceTrack = RTCRtpSender.prototype.replaceTrack;
   const pcs = new Set();
+  const connectedAt = new WeakMap(); // pc -> when it first reached "connected"
   let port = null;     // MessagePort to content.js
   let options = { keepMic: false, workletUrl: '' };
   let armed = null;    // { callId, timer, poll }
@@ -33,7 +35,10 @@
       const pc = Reflect.construct(target, args, newTarget);
       pcs.add(pc);
       pc.addEventListener('track', () => { if (armed) tryStart(); else bridge?.sync(); });
-      pc.addEventListener('connectionstatechange', () => { if (armed) tryStart(); });
+      pc.addEventListener('connectionstatechange', () => {
+        if (pc.connectionState === 'connected' && !connectedAt.has(pc)) connectedAt.set(pc, Date.now());
+        if (armed) tryStart();
+      });
       return pc;
     },
   });
@@ -69,7 +74,7 @@
       at: Date.now(),
       // Connections already live before the answer (another call or meeting still open) are only
       // used if no new one shows up; Teams may also connect the call while it is still ringing.
-      preexisting: new Set(callPeers()),
+      preexisting: new Set(callPeers().filter(pc => Date.now() - (connectedAt.get(pc) ?? 0) > RECENT_MS)),
       timer: setTimeout(() => {
         disarm();
         if (window === window.top) post({ type: 'failed', callId, reason: 'No call audio appeared within 30 s of answering.' });

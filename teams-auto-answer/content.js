@@ -143,15 +143,43 @@
   };
   window.postMessage({ __tca: 'connect' }, '*', [pageChannel.port2]);
 
-  // Any press of a Teams accept button on a ringing call (by a person, a shortcut or auto-answer)
-  // starts the bridge. Capture phase, because Teams removes the toast as soon as it handles the click.
-  document.addEventListener('click', (e) => {
-    if (!settings.bridgeEnabled) return;
-    const btn = e.target.closest?.('button, [role="button"]');
-    if (!btn) return;
+  // Only a person pressing Teams' own accept button starts the bridge. Answers made by the extension
+  // (side panel, shortcuts, auto-answer) use btn.click(), whose events are untrusted, so they don't.
+  // Capture phase, because Teams removes the toast as soon as it handles the press. If Teams reacts
+  // on pointerdown/pointerup and removes the button first, Chrome sends no click at all, so a press
+  // on an accept button whose button is gone shortly after the release also counts as answering.
+  const PRESS_GONE_MS = 300;
+  let pressed = null; // { btn, caller } from the last trusted pointerdown on an accept button
+
+  function acceptButtonCall(target) {
+    const btn = target?.closest?.('button, [role="button"]');
+    if (!btn) return null;
     const call = D.detectCalls(document, settings)
       .find(c => [c.actions.audio, c.actions.video, c.actions.accept].includes(btn));
-    if (call) send({ type: 'bridge-arm', caller: call.caller, by: e.isTrusted ? 'click' : 'extension' });
+    return call ? { btn, caller: call.caller } : null;
+  }
+
+  function personAnswered(caller) {
+    pressed = null;
+    send({ type: 'bridge-arm', caller });
+  }
+
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.isTrusted || !settings.bridgeEnabled) return;
+    pressed = acceptButtonCall(e.target);
+  }, true);
+
+  document.addEventListener('pointerup', (e) => {
+    if (!e.isTrusted || !pressed) return;
+    const press = pressed;
+    setTimeout(() => { if (pressed === press && !press.btn.isConnected) personAnswered(press.caller); }, PRESS_GONE_MS);
+  }, true);
+
+  document.addEventListener('click', (e) => {
+    if (!e.isTrusted || !settings.bridgeEnabled) return;
+    const hit = acceptButtonCall(e.target);
+    if (hit) personAnswered(hit.caller);
+    else pressed = null;
   }, true);
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

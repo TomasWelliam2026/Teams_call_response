@@ -23,8 +23,8 @@
 
   <section>
     <h2>Audio bridge</h2>
-    <label class="check"><input type="checkbox" id="bridgeEnabled"> Stream answered calls to my server</label>
-    <p class="hint">After a call is answered, the caller's audio goes to the server and the server's audio is sent to the caller in place of your microphone.</p>
+    <label class="check"><input type="checkbox" id="bridgeEnabled"> Stream calls I answer in Teams to my server</label>
+    <p class="hint">When you click Teams' own Answer button, the caller's audio goes to the server and the server's audio is sent to the caller in place of your microphone. Calls answered from this panel, a shortcut or auto-answer aren't streamed.</p>
     <label for="serverUrl">Server URL</label>
     <input type="text" id="serverUrl" placeholder="wss://bridge.example.com/call" spellcheck="false" autocomplete="off">
     <label for="bridgeToken">Access token</label>
