@@ -60,7 +60,14 @@ Generate a token with `node -e "console.log(require('crypto').randomBytes(24).to
    - Extension side panel: **Server URL** `wss://<domain>/call`, **Access token** = `BRIDGE_TOKEN`
    - Operator console: open `https://<domain>/` **on your own computer**, enter `OPERATOR_TOKEN`, allow the microphone.
 
-Logs are in `server\logs\`. Remove everything with `server\deploy\windows\uninstall.ps1`.
+The server has no window of its own; it runs invisibly in the background. To see it, double-click
+`server\monitor.bat`. It shows whether both tasks run, how many Teams computers and Call Bridge apps
+are connected, and the server's log as it happens. Closing that window doesn't stop the server.
+
+Logs are in `server\logs\`. If the server was stopped, double-click `server\start.bat`. It starts both tasks
+(it asks for administrator rights) and checks that the site answers. Don't use `npm start` on the VPS:
+the task already runs the server with the tokens from `.env`.
+Remove everything with `server\deploy\windows\uninstall.ps1`.
 
 ## Deploy elsewhere
 
