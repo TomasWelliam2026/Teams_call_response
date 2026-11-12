@@ -86,6 +86,10 @@ and copy the part after `=`.
 For the extension you can skip typing. Put a `bridge-config.json` with the URL and `BRIDGE_TOKEN` next to its
 `manifest.json` (see the extension README), and it fills both fields in when it's loaded or reloaded.
 
+`tools\package-extension.ps1` builds two packages:
+- **`dist\teams-call-answerer-extension.zip`**: no token, safe to share or commit. Enter the URL and token in the panel.
+- **`dist\private\teams-call-answerer-extension-with-token.zip`**: includes `bridge-config.json`. It's git-ignored; never commit or share it.
+
 Treat both tokens like passwords. To change them, delete `server\.env`, run `install.ps1` again, and enter
 the new tokens in the extension and the app.
 
