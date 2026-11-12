@@ -205,9 +205,16 @@
     return !!document.querySelector('[data-tid="microphone-button"], [data-tid="camera-button"], [data-tid="myself-video-more-menu"]');
   }
 
-  /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined. */
+  /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined.
+   * Teams' title is "<unread prefix><view name> | <content name> | Microsoft Teams" (e.g.
+   * "(1) Chat | Meeting with Jason ChanMing | Microsoft Teams"); the content name - what we want -
+   * is the segment right before the trailing "Microsoft Teams", not the first one (confirmed
+   * against a live meeting: the first segment is just the current view, e.g. "Chat" or "People"). */
   function meetingLabel() {
-    return document.title.replace(/^\(\d+\)\s*/, '').split('|')[0].trim() || 'Teams meeting';
+    const parts = document.title.split('|').map(s => s.trim()).filter(Boolean);
+    while (parts.length > 1 && /^Microsoft Teams$/i.test(parts[parts.length - 1])) parts.pop();
+    const name = (parts[parts.length - 1] || '').replace(/^\(\d+\)\s*/, '').trim();
+    return name || 'Teams meeting';
   }
 
   /** Arms the bridge for a meeting (or a call Teams connected without our own answer detection
