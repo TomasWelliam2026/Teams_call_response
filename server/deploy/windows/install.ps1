@@ -81,7 +81,8 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $system = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
-$serverCmd = "`"$Node`" --env-file=.env server.js >> logs\server.log 2>&1"
+# run-server.cmd starts node again if it ever exits (the task's own restart only covers failed starts).
+$serverCmd = "set `"NODE=$Node`"&& deploy\windows\run-server.cmd"
 $caddyCmd = "set XDG_DATA_HOME=$ServerDir\bin\caddy-data&& bin\caddy.exe reverse-proxy --from $Domain --to 127.0.0.1:$Port >> logs\caddy.log 2>&1"
 $tasks = @{
   'CallBridge Server' = $serverCmd
