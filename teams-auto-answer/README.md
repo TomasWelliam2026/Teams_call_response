@@ -42,6 +42,8 @@ Chrome only allows Ctrl+Shift+0–9 for global shortcuts.
 ## Connecting to the server
 
 Open the side panel and enter the **Server URL** (`wss://your-server/call`) and the **Access token**.
+The token is `BRIDGE_TOKEN` from `server\.env` on the server. See **Server URL and tokens** in
+[`server/README.md`](../server/README.md) for how to copy it.
 That's the whole setup: the extension connects as soon as both are valid.
 The status badge next to "Server connection" shows **Not set up**, **Connecting…**, **Connected** or **Disconnected**.
 Disconnected comes with the reason, for example a rejected token, and the extension keeps retrying.
