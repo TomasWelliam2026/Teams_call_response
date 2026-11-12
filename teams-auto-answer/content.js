@@ -103,6 +103,9 @@
   // and the app's Mute presses Teams' button so Teams (and the caller) show the call as muted.
   // Teams' in-call button: data-tid="microphone-button", label "Mute mic" / "Unmute mic".
   let appMuted = false;     // last request from the app
+  let appChangedAt = 0;
+  let seenTeams = null;     // Teams' button state as last seen, and when it last changed
+  let teamsChangedAt = 0;
   let reportedMute = null;  // last state sent to the page and the server
 
   function micButton() {
@@ -123,7 +126,11 @@
 
   function syncMute() {
     if (!bridgeCallId) return;
-    const muted = teamsMuted() ?? appMuted;
+    const teams = teamsMuted();
+    if (teams !== seenTeams) { seenTeams = teams; teamsChangedAt = Date.now(); }
+    // The most recent action wins. Normally the app's request flips Teams' button and both agree;
+    // if Teams refuses to change (e.g. "Teams couldn't unmute"), the app's newer request still counts.
+    const muted = teams === null || appChangedAt > teamsChangedAt ? appMuted : teams;
     if (muted === reportedMute) return;
     reportedMute = muted;
     pagePort.postMessage({ type: 'mute', callId: bridgeCallId, muted });
@@ -132,6 +139,7 @@
 
   function appSetMute(muted) {
     appMuted = muted;
+    appChangedAt = Date.now();
     const current = teamsMuted();
     if (current !== null && current !== muted) micButton().click();
     syncMute();
@@ -142,6 +150,9 @@
     closeBridgePort();
     bridgeCallId = callId;
     appMuted = false;
+    appChangedAt = 0;
+    seenTeams = null;
+    teamsChangedAt = 0;
     reportedMute = null;
     bridgePort = chrome.runtime.connect({ name: 'bridge' });
     bridgePort.onMessage.addListener((msg) => {

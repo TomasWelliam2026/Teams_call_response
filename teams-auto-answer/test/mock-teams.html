@@ -127,10 +127,19 @@
       micButton.dataset.tid = 'microphone-button';
       micButton.setAttribute('aria-label', 'Mute mic');
       micButton.textContent = 'Mic';
+      // Like Teams: mute disables its own mic track; unmute first checks the sender still carries
+      // that track, and refuses ("Teams couldn't unmute") when something else is in its place.
+      const micTrack = mic.getAudioTracks()[0];
       micButton.onclick = () => {
-        const nowMuted = micButton.getAttribute('aria-label') === 'Mute mic';
-        micButton.setAttribute('aria-label', nowMuted ? 'Unmute mic' : 'Mute mic');
-        logEvent(`Teams mic button: ${nowMuted ? 'muted' : 'unmuted'}`);
+        const muting = micButton.getAttribute('aria-label') === 'Mute mic';
+        if (!muting && teams.getSenders()[0].track !== micTrack) {
+          window.__couldntUnmute = (window.__couldntUnmute || 0) + 1;
+          logEvent("Teams couldn't unmute (the sender isn't carrying Teams' mic track)");
+          return;
+        }
+        micTrack.enabled = !muting;
+        micButton.setAttribute('aria-label', muting ? 'Unmute mic' : 'Mute mic');
+        logEvent(`Teams mic button: ${muting ? 'muted' : 'unmuted'}`);
       };
       document.querySelector('.controls').append(micButton);
       call = { ctx, teams, remote, analyser, micButton };

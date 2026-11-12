@@ -53,6 +53,16 @@
     return Promise.resolve();
   };
 
+  // Teams checks sender.track before unmuting; finding our bridge track there instead of its own
+  // mic, it refuses ("Teams couldn't unmute"). So while bridged, Teams sees its own track. The
+  // bridge track still goes out, because it was set with the native replaceTrack.
+  const nativeTrackGetter = Object.getOwnPropertyDescriptor(RTCRtpSender.prototype, 'track').get;
+  Object.defineProperty(RTCRtpSender.prototype, 'track', {
+    configurable: true,
+    enumerable: true,
+    get() { return bridge?.owns(this) ? bridge.originalOf(this) : nativeTrackGetter.call(this); },
+  });
+
   const isOpen = (pc) => pc.signalingState !== 'closed' && !['closed', 'failed'].includes(pc.connectionState);
   const isConnected = (pc) => pc.connectionState === 'connected' || ['connected', 'completed'].includes(pc.iceConnectionState);
   const remoteAudio = (pc) => pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio' && t.readyState === 'live');
@@ -177,6 +187,7 @@
       setMuted: (muted) => engine.setMuted(muted),
       stop,
       owns: (sender) => injected.has(sender),
+      originalOf: (sender) => injected.get(sender) ?? null,
       setOriginal,
       info: () => ({ peers: peers.size, remoteTracks: remotes.size, senders: injected.size, ...engine.info }),
     };
