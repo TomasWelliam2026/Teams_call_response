@@ -195,13 +195,13 @@
   // A call rings and gets answered (a toast with an Accept button we can watch for); a meeting has
   // none of that - you join it yourself, from a calendar invite, a chat link, "Meet now", anywhere.
   // There's no single action to hook, so instead this watches for the thing every live call or
-  // meeting shows once its media is up: Teams' own Leave control, strictly by data-tid (unlike
-  // hangupButton()'s label fallback above, used only when we already know a call should be
-  // ending - here a label match elsewhere on the page, e.g. "Leave team", would mean false arms),
-  // paired with a second, also tid-based signal that it's really a call/meeting toolbar and not
-  // some other "Leave"-labelled control, to keep the same safety margin on both surfaces.
+  // meeting shows once its media is up: Teams' own Leave control. A third surface, confirmed live -
+  // a meeting joined as a participant rather than its organizer - drops even the Leave button's
+  // data-tid to "" (empty), label only, so hangupButton()'s label fallback is needed here too; this
+  // still pairs it with a second, tid-based signal that it's really a call/meeting toolbar and not
+  // some other "Leave"-labelled control elsewhere on the page, to keep a safety margin.
   function callUiActive() {
-    if (!document.querySelector('[data-tid="hangup-button"], [data-tid="hangup-main-btn"]')) return false;
+    if (!hangupButton()) return false;
     return !!document.querySelector('[data-tid="microphone-button"], [data-tid="camera-button"], [data-tid="myself-video-more-menu"]');
   }
 
