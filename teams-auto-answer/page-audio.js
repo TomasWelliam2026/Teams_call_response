@@ -66,9 +66,12 @@
   const isOpen = (pc) => pc.signalingState !== 'closed' && !['closed', 'failed'].includes(pc.connectionState);
   const isConnected = (pc) => pc.connectionState === 'connected' || ['connected', 'completed'].includes(pc.iceConnectionState);
   const remoteAudio = (pc) => pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio' && t.readyState === 'live');
+  // Includes a transceiver negotiated "recvonly" (Teams does this when the computer's microphone
+  // is muted or missing, which is also why Teams' own Mute button is disabled then). inject() below
+  // flips it to sendrecv so the bridge's track actually goes out instead of being silently dropped.
   const audioSenders = (pc) => pc.getTransceivers()
-    .filter(t => t.receiver.track?.kind === 'audio' && ['sendrecv', 'sendonly'].includes(t.currentDirection || t.direction))
-    .map(t => t.sender);
+    .filter(t => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio')
+    .map(t => t);
 
   function callPeers() {
     for (const pc of pcs) if (!isOpen(pc)) pcs.delete(pc);
@@ -144,9 +147,13 @@
       engine.setMic(sender, options.keepMic && track?.readyState === 'live' ? track : null);
     }
 
-    function inject(sender) {
+    function inject(transceiver) {
+      const sender = transceiver.sender;
       if (injected.has(sender)) return;
       setOriginal(sender, sender.track);
+      // "recvonly" (no mic on this computer) would have the sender drop every packet; sendrecv lets
+      // the bridge's track actually reach the call.
+      if (transceiver.direction !== 'sendrecv' && transceiver.direction !== 'sendonly') transceiver.direction = 'sendrecv';
       nativeReplaceTrack.call(sender, engine.outTrack).catch((err) => post({ type: 'log', message: `Could not replace the microphone: ${err.message}` }));
     }
 
