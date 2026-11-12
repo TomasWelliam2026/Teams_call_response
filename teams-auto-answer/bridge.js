@@ -2,8 +2,8 @@
 // Owns the WebSocket to the audio server for one answered call. No chrome.* APIs here, so the
 // mock page can run the exact same code.
 //
-// Wire protocol (see server/README.md):
-//   extension -> server  text  {type:'hello', token, callId, caller, format, client}   then binary audio frames
+// Wire protocol (see server/README.md), /call — one connection per bridged call:
+//   extension -> server  text  {type:'hello', token, callId, ringId, caller, format, client}   then binary audio frames
 //   server -> extension  text  {type:'ready'} | {type:'stop', reason} | {type:'error', message}
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
 (() => {
@@ -50,6 +50,7 @@
     let ws = null;
     let callId = null;
     let caller = '';
+    let ringId = null;     // set when the call was answered from the local app, so the server routes it there
     let ready = false;
     let closed = false;
     let attempts = 0;
@@ -63,7 +64,7 @@
       ws = new WebSocket(cfg.serverUrl);
       ws.binaryType = 'arraybuffer';
       helloTimer = setTimeout(() => ws.close(), HELLO_TIMEOUT_MS);
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: cfg.token, callId, caller, format: FORMAT, client: CLIENT }));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: cfg.token, callId, ringId, caller, format: FORMAT, client: CLIENT }));
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') {
           if (ready) toPort({ type: 'audio', data: toBase64(e.data) });
@@ -118,6 +119,7 @@
       } else if (msg.type === 'start' && !callId) {
         callId = msg.callId;
         caller = msg.caller || 'Unknown caller';
+        ringId = msg.ringId || null;
         const cfg = await getConfig();
         if (closed) return; // the call ended while we were reading settings
         const problem = checkServerUrl(cfg.serverUrl) || (!cfg.token && 'Set the access token in the side panel.');
@@ -157,5 +159,78 @@
     });
   }
 
-  globalThis.TeamsCallBridge = { FORMAT, toBase64, fromBase64, checkServerUrl, serveBridgePort, testServer };
+  /**
+   * The always-on link to the server's /station endpoint: tells the server which calls are ringing,
+   * and receives Answer/Decline from the local app. Reconnects with backoff and sends a keepalive
+   * (which also keeps the extension's service worker awake).
+   *   extension -> server  {type:'hello', role:'station', token, client} | {type:'ringing', ringId, caller}
+   *                        | {type:'ring-ended', ringId} | {type:'answer-result', ringId, ok, message} | {type:'ping'}
+   *   server -> extension  {type:'ready'} | {type:'answer'|'decline', ringId, mode} | {type:'pong'}
+   * getConfig() -> { serverUrl, token, enabled }; onOpen() is called after each (re)connect so the caller
+   * can re-announce calls that are still ringing; onStatus({ state, reason }) reports
+   * 'connecting' | 'connected' | 'disconnected' | 'off'.
+   */
+  function createStation({ getConfig, onCommand, onOpen, onStatus }) {
+    const KEEPALIVE_MS = 20000;
+    let ws = null;
+    let ready = false;
+    let retry = 0;
+    let retryTimer = null;
+    let keepalive = null;
+    let wantedUrl = null;
+
+    const stationUrl = (callUrl) => callUrl.replace(/\/call\/?$/, '') + '/station';
+
+    function send(msg) {
+      if (ready && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    }
+
+    function teardown() {
+      clearTimeout(retryTimer);
+      clearInterval(keepalive);
+      ready = false;
+      if (ws) { ws.onclose = null; try { ws.close(1000); } catch { /* closing */ } }
+      ws = null;
+    }
+
+    /** (Re)connects if settings allow and we're not already connected to the right place. */
+    async function ensure() {
+      const cfg = await getConfig();
+      const usable = cfg.enabled && cfg.token && cfg.serverUrl && !checkServerUrl(cfg.serverUrl);
+      if (!usable) { teardown(); wantedUrl = null; onStatus?.({ state: 'off' }); return; }
+      const url = stationUrl(cfg.serverUrl);
+      if (ws && wantedUrl === url && ws.readyState <= WebSocket.OPEN) return;
+      teardown();
+      wantedUrl = url;
+      onStatus?.({ state: 'connecting' });
+      ws = new WebSocket(url);
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'station', token: cfg.token, client: CLIENT }));
+      ws.onmessage = (e) => {
+        let msg;
+        try { msg = JSON.parse(e.data); } catch { return; }
+        if (msg.type === 'ready') {
+          ready = true;
+          retry = 0;
+          keepalive = setInterval(() => send({ type: 'ping' }), KEEPALIVE_MS);
+          onStatus?.({ state: 'connected' });
+          onOpen?.();
+        } else if (msg.type === 'answer' || msg.type === 'decline') {
+          onCommand?.(msg);
+        }
+      };
+      ws.onclose = (e) => {
+        clearInterval(keepalive);
+        ready = false;
+        ws = null;
+        const reason = e.code === CLOSE_UNAUTHORIZED ? 'The server rejected the access token.' : `Connection closed (code ${e.code}).`;
+        onStatus?.({ state: 'disconnected', reason });
+        const delay = Math.min(30000, 1000 * 2 ** retry++);
+        retryTimer = setTimeout(ensure, e.code === CLOSE_UNAUTHORIZED ? 60000 : delay);
+      };
+    }
+
+    return { ensure, send, close: teardown, get connected() { return ready; } };
+  }
+
+  globalThis.TeamsCallBridge = { FORMAT, toBase64, fromBase64, checkServerUrl, serveBridgePort, testServer, createStation };
 })();

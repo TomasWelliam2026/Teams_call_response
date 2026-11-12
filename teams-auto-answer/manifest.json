@@ -4,7 +4,7 @@
   "version": "0.2.0",
   "description": "Answer Microsoft Teams (web) calls with shortcuts or auto-answer, and bridge answered calls' audio to your server.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "notifications", "tabs", "sidePanel"],
+  "permissions": ["storage", "notifications", "tabs", "sidePanel", "alarms"],
   "host_permissions": [
     "https://teams.microsoft.com/*",
     "https://teams.cloud.microsoft/*",

@@ -14,7 +14,7 @@
 
   // Fake background handling for the bridge messages content.js sends.
   function background(msg) {
-    if (msg.type === 'bridge-arm') setTimeout(() => deliver({ type: 'bridge-arm', callId: crypto.randomUUID(), caller: msg.caller }), 0);
+    if (msg.type === 'bridge-arm') setTimeout(() => deliver({ type: 'bridge-arm', callId: crypto.randomUUID(), caller: msg.caller, ringId: msg.ringId }), 0);
   }
 
   // Two linked chrome.runtime.Port look-alikes. Messages are JSON-cloned like the real thing.

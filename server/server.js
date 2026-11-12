@@ -1,9 +1,12 @@
 // Audio bridge server for the Teams Call Answerer extension.
 //
+//   /station   The extension's always-on link: it reports which Teams calls are ringing and
+//              carries out Answer/Decline pressed in the local app.
 //   /call      The extension connects here after a Teams call is answered and streams it:
 //              binary PCM s16le, mono, 16 kHz, 20 ms frames, both directions.
-//   /operator  The browser console in public/ connects here. A signed-in operator can take a
-//              live call: they hear the caller and their microphone goes to the caller.
+//   /operator  The local app (public/, installable) connects here. It shows ringing calls; Answer
+//              makes the extension answer in Teams and routes that call's audio to this operator,
+//              who hears the caller and whose microphone goes to the caller.
 //   /healthz   Liveness check for your hosting platform.
 //
 // A call nobody has taken is handled by FALLBACK: "silence" (default) or "echo" (the caller
@@ -16,6 +19,7 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = Number(process.env.PORT) || 8080;
+const HOST = process.env.HOST || '0.0.0.0'; // 127.0.0.1 when a local HTTPS proxy (Caddy) is the only way in
 const CALL_TOKEN = process.env.BRIDGE_TOKEN || '';
 const OPERATOR_TOKEN = process.env.OPERATOR_TOKEN || CALL_TOKEN;
 const FALLBACK = process.env.FALLBACK === 'echo' ? 'echo' : 'silence';
@@ -23,8 +27,15 @@ const HELLO_TIMEOUT_MS = 5000;
 const RESUME_GRACE_MS = 15000;   // a call whose extension reconnects within this keeps its operator
 const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
-const STATIC = { '/': 'index.html', '/console.js': 'console.js', '/console.css': 'console.css' };
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const ANSWER_ROUTE_MS = 60000;   // after Answer in the local app, the call that connects within this goes to that operator
+const STATIC = {
+  '/': 'index.html', '/console.js': 'console.js', '/console.css': 'console.css',
+  '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
+};
+const TYPES = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.webmanifest': 'application/manifest+json', '.png': 'image/png',
+};
 
 const CLOSE = { unauthorized: 4001, badHello: 4002, replaced: 4003 };
 
@@ -45,9 +56,14 @@ const sendJson = (ws, msg) => { if (ws?.readyState === ws.OPEN) ws.send(JSON.str
 
 // ---- State -------------------------------------------------------------------------------
 
-/** callId -> { id, caller, ws, operator, startedAt, endTimer } */
+/** callId -> { id, caller, ws, operator, startedAt, endTimer, framesIn } */
 const calls = new Map();
 const operators = new Set();
+const stations = new Set();
+/** ringId -> { ringId, caller, station, since, answering } — Teams calls ringing right now */
+const rings = new Map();
+/** ringId -> operator who pressed Answer; the call that connects with this ringId goes to them */
+const answeredBy = new Map();
 
 function callList() {
   return [...calls.values()].map(c => ({
@@ -55,9 +71,26 @@ function callList() {
   }));
 }
 
+function ringList() {
+  return [...rings.values()].map(r => ({ ringId: r.ringId, caller: r.caller, since: r.since, answering: !!r.answering }));
+}
+
+/** Tells every operator about live calls, ringing calls and how many Teams computers are linked. */
 function broadcastCalls() {
-  const msg = { type: 'calls', calls: callList() };
+  const msg = { type: 'calls', calls: callList(), rings: ringList(), stations: stations.size };
   for (const op of operators) sendJson(op, { ...msg, mine: op.callId || null });
+}
+
+/** Routes a call's audio to an operator, releasing whatever call they had before. */
+function giveCallTo(call, op) {
+  const previous = op.callId && calls.get(op.callId);
+  if (previous && previous !== call && previous.operator === op) {
+    previous.operator = null;
+    sendJson(op, { type: 'released', callId: previous.id, reason: 'took another call' });
+  }
+  call.operator = op;
+  op.callId = call.id;
+  sendJson(op, { type: 'taken', callId: call.id, caller: call.caller });
 }
 
 function endCall(call, reason) {
@@ -113,7 +146,10 @@ function onCallSocket(ws) {
       } else {
         call = { id, caller: String(msg.caller || 'Unknown caller').slice(0, 120), ws, operator: null, startedAt: Date.now(), endTimer: null, framesIn: 0 };
         calls.set(id, call);
-        log(`call ${id.slice(0, 8)} started (${msg.client || 'unknown client'})`);
+        const op = answeredBy.get(msg.ringId);
+        answeredBy.delete(msg.ringId);
+        if (op && operators.has(op)) giveCallTo(call, op);
+        log(`call ${id.slice(0, 8)} started (${msg.client || 'unknown client'})${op ? ', answered from the local app' : ''}`);
       }
       sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK });
       broadcastCalls();
@@ -173,11 +209,22 @@ function onOperatorSocket(ws) {
       case 'take':
         if (!call) return sendJson(ws, { type: 'error', message: 'That call has ended.' });
         if (call.operator && call.operator !== ws) return sendJson(ws, { type: 'error', message: 'Another operator has that call.' });
-        release('took another call');
-        call.operator = ws;
-        ws.callId = call.id;
-        sendJson(ws, { type: 'taken', callId: call.id, caller: call.caller });
+        giveCallTo(call, ws);
         break;
+      case 'answer':
+      case 'decline': {
+        const ring = rings.get(msg.ringId);
+        if (!ring) return sendJson(ws, { type: 'error', message: 'That call is no longer ringing.' });
+        if (msg.type === 'answer') {
+          if (ring.answering && ring.answering !== ws) return sendJson(ws, { type: 'error', message: 'Another operator is answering that call.' });
+          ring.answering = ws;
+          answeredBy.set(ring.ringId, ws);
+          setTimeout(() => { if (answeredBy.get(ring.ringId) === ws) answeredBy.delete(ring.ringId); }, ANSWER_ROUTE_MS);
+        }
+        sendJson(ring.station, { type: msg.type, ringId: ring.ringId, mode: 'audio' });
+        log(`ring ${ring.ringId.slice(0, 8)}: operator pressed ${msg.type}`);
+        break;
+      }
       case 'release':
         release('released');
         break;
@@ -192,6 +239,66 @@ function onOperatorSocket(ws) {
     clearTimeout(helloTimer);
     release('disconnected');
     operators.delete(ws);
+    broadcastCalls();
+  });
+}
+
+// ---- /station: the extension's always-on link ---------------------------------------------
+
+function onStationSocket(ws) {
+  let authed = false;
+  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
+  const validId = (id) => typeof id === 'string' && /^[\w-]{8,64}$/.test(id);
+
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) return;
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+
+    if (!authed) {
+      clearTimeout(helloTimer);
+      if (msg.type !== 'hello' || !tokenMatches(msg.token, CALL_TOKEN)) return ws.close(CLOSE.unauthorized, 'unauthorized');
+      authed = true;
+      stations.add(ws);
+      sendJson(ws, { type: 'ready' });
+      log(`station linked (${msg.client || 'unknown client'}); ${stations.size} linked`);
+      broadcastCalls();
+      return;
+    }
+
+    switch (msg.type) {
+      case 'ping':
+        sendJson(ws, { type: 'pong' });
+        return;
+      case 'ringing':
+        if (!validId(msg.ringId) || rings.has(msg.ringId)) return;
+        rings.set(msg.ringId, { ringId: msg.ringId, caller: String(msg.caller || 'Unknown caller').slice(0, 120), station: ws, since: Date.now(), answering: null });
+        log(`ring ${msg.ringId.slice(0, 8)} from ${rings.get(msg.ringId).caller}`);
+        break;
+      case 'ring-ended':
+        if (!rings.delete(msg.ringId)) return;
+        break;
+      case 'answer-result': {
+        const op = answeredBy.get(msg.ringId);
+        if (!msg.ok) {
+          answeredBy.delete(msg.ringId);
+          const ring = rings.get(msg.ringId);
+          if (ring) ring.answering = null;
+          if (op) sendJson(op, { type: 'error', message: `Could not answer: ${msg.message || 'unknown reason'}` });
+        }
+        break;
+      }
+      default:
+        return;
+    }
+    broadcastCalls();
+  });
+
+  ws.on('close', () => {
+    clearTimeout(helloTimer);
+    if (!stations.delete(ws)) return;
+    for (const [id, r] of rings) if (r.station === ws) rings.delete(id);
+    log(`station unlinked; ${stations.size} linked`);
     broadcastCalls();
   });
 }
@@ -219,7 +326,7 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket };
+const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket };
 
 server.on('upgrade', (req, socket, head) => {
   const route = ROUTES[new URL(req.url, 'http://localhost').pathname];
@@ -241,7 +348,7 @@ const heartbeat = setInterval(() => {
   }
 }, 20000);
 
-server.listen(PORT, () => log(`bridge server on :${PORT} (fallback: ${FALLBACK})`));
+server.listen(PORT, HOST, () => log(`bridge server on ${HOST}:${PORT} (fallback: ${FALLBACK})`));
 
 function shutdown() {
   clearInterval(heartbeat);

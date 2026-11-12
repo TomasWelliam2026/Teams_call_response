@@ -3,13 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Call Bridge Console</title>
+  <meta name="theme-color" content="#188038">
+  <title>Call Bridge</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
   <link rel="stylesheet" href="console.css">
 </head>
 <body>
   <main>
-    <h1>Call Bridge Console</h1>
-    <p class="muted">Answered Teams calls appear here. Take one to hear the caller and talk through your microphone.</p>
+    <header class="top">
+      <h1>Call Bridge</h1>
+      <button id="install" hidden>Install app</button>
+    </header>
+    <p class="muted">Teams calls ring here. Answer to talk with the caller through this computer's microphone and speakers.</p>
 
     <form id="login">
       <label for="token">Operator token</label>
@@ -17,26 +23,39 @@
         <input type="password" id="token" autocomplete="current-password" required>
         <button type="submit" class="primary">Connect</button>
       </div>
+      <label class="check"><input type="checkbox" id="remember" checked> Remember on this computer and connect automatically</label>
     </form>
 
     <p id="status" class="status" role="status">Not connected.</p>
+    <p id="mic" class="mic" role="status"></p>
 
-    <section id="active" hidden>
-      <h2>On call</h2>
-      <div class="card live">
-        <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
-        <div class="row">
-          <button id="mute">Mute</button>
-          <button id="release">Release</button>
-          <button id="handBack" class="danger" title="Stop the bridge; the person at the Teams computer gets the call back">Hand back to Teams user</button>
+    <div id="main" hidden>
+      <p id="stations" class="stations"></p>
+
+      <section id="ringsSection" hidden>
+        <h2>Ringing</h2>
+        <ul id="rings" class="calls"></ul>
+      </section>
+
+      <section id="active" hidden>
+        <h2>On call</h2>
+        <div class="card live">
+          <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
+          <div class="row">
+            <button id="mute">Mute</button>
+            <button id="release" title="Stop hearing this call; the caller stays connected">Release</button>
+            <button id="handBack" class="danger" title="Stop the bridge; the person at the Teams computer gets the call back">Hand back to Teams computer</button>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="callsSection" hidden>
-      <h2>Live calls</h2>
-      <ul id="calls" class="calls"></ul>
-    </section>
+      <section id="callsSection" hidden>
+        <h2>Live calls</h2>
+        <ul id="calls" class="calls"></ul>
+      </section>
+
+      <p><button id="signOut" class="link">Sign out</button></p>
+    </div>
   </main>
   <script src="console.js"></script>
 </body>

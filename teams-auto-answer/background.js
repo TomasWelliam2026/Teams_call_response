@@ -118,7 +118,7 @@ async function handleBridgeMessage(msg, sender) {
       const callId = crypto.randomUUID();
       await setBridgeStatus({ state: 'waiting', callId, caller: msg.caller });
       // Every frame gets it; the one holding the call's audio connection starts the bridge.
-      chrome.tabs.sendMessage(sender.tab.id, { type: 'bridge-arm', callId, caller: msg.caller }).catch(() => {});
+      chrome.tabs.sendMessage(sender.tab.id, { type: 'bridge-arm', callId, caller: msg.caller, ringId: msg.ringId }).catch(() => {});
       return;
     }
     case 'bridge-event':
@@ -140,9 +140,66 @@ async function handleBridgeMessage(msg, sender) {
   }
 }
 
+// ---- Station: the always-on link that lets the local app see rings and answer them ----------
+// Rings live in storage.session so they survive the service worker being restarted.
+const RING_TTL_MS = 120000; // forget a ring the content script never reported as ended
+
+async function getRings() {
+  const { rings = {} } = await chrome.storage.session.get('rings');
+  for (const [id, r] of Object.entries(rings)) if (Date.now() - r.since > RING_TTL_MS) delete rings[id];
+  return rings;
+}
+
+async function updateRings(fn) {
+  const rings = await getRings();
+  fn(rings);
+  await chrome.storage.session.set({ rings });
+}
+
+const station = Bridge.createStation({
+  getConfig: async () => ({ ...(await getBridgeConfig()), enabled: (await getSettings()).bridgeEnabled }),
+  onStatus: (s) => chrome.storage.session.set({ stationStatus: { ...s, time: Date.now() } }),
+  onOpen: async () => {
+    for (const r of Object.values(await getRings())) station.send({ type: 'ringing', ringId: r.ringId, caller: r.caller });
+  },
+  onCommand: async (cmd) => {
+    const ring = (await getRings())[cmd.ringId];
+    const action = cmd.type === 'decline' ? 'decline' : (cmd.mode || 'audio');
+    let res = { ok: false, message: 'That call is no longer ringing on the Teams computer.' };
+    if (ring) {
+      res = (await chrome.tabs.sendMessage(ring.tabId, { type: 'remote-answer', ringId: cmd.ringId, action }).catch(() => null))
+        || { ok: false, message: 'The Teams tab did not respond.' };
+    }
+    if (res.ok) await addLog({ event: ACTION_LABELS[res.action], caller: res.caller, source: 'local app' });
+    station.send({ type: 'answer-result', ringId: cmd.ringId, ok: !!res.ok, message: res.message });
+  },
+});
+
+station.ensure();
+// The worker can be stopped while idle; the alarm brings it back and reconnects if needed.
+chrome.alarms.create('station', { periodInMinutes: 1 });
+chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'station') station.ensure(); });
+
+// Optional provisioning: bridge-config.json next to manifest.json (git-ignored) sets the server URL
+// and access token on install/reload, so a machine can be set up without typing secrets into the panel.
+// Shape: { "serverUrl": "wss://host/call", "token": "…", "enabled": true }
+async function applyProvisionedConfig() {
+  let cfg;
+  try {
+    cfg = await (await fetch(chrome.runtime.getURL('bridge-config.json'))).json();
+  } catch {
+    return; // no file
+  }
+  if (cfg.serverUrl && !Bridge.checkServerUrl(cfg.serverUrl)) await chrome.storage.sync.set({ serverUrl: cfg.serverUrl });
+  if (typeof cfg.enabled === 'boolean') await chrome.storage.sync.set({ bridgeEnabled: cfg.enabled });
+  if (cfg.token) await chrome.storage.local.set({ bridgeToken: cfg.token });
+  await addLog({ event: 'Bridge settings loaded', detail: `from bridge-config.json (${cfg.serverUrl || 'no URL'})` });
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.sync.get(null);
   await chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored });
+  await applyProvisionedConfig();
   await refreshBadge();
   await keepTeamsTabsAlive();
 });
@@ -150,6 +207,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(() => { refreshBadge(); keepTeamsTabsAlive(); });
 
 chrome.storage.onChanged.addListener((changes, area) => {
+  if ((area === 'sync' && (changes.bridgeEnabled || changes.serverUrl)) || (area === 'local' && changes.bridgeToken)) station.ensure();
   if (area !== 'sync') return;
   if (changes.enabled) refreshBadge();
   if (changes.keepAlive) keepTeamsTabsAlive();
@@ -179,9 +237,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case 'call-detected':
         await refreshBadge(true);
         await addLog({ event: 'Incoming call', caller: msg.caller, detail: msg.decision });
+        if (msg.ringId && sender.tab) {
+          await updateRings((rings) => { rings[msg.ringId] = { ringId: msg.ringId, caller: msg.caller, tabId: sender.tab.id, since: Date.now() }; });
+          station.send({ type: 'ringing', ringId: msg.ringId, caller: msg.caller });
+        }
         break;
       case 'call-ended':
         await refreshBadge(false);
+        if (msg.ringId) {
+          await updateRings((rings) => { delete rings[msg.ringId]; });
+          station.send({ type: 'ring-ended', ringId: msg.ringId });
+        }
         break;
       case 'call-auto-answered': {
         await refreshBadge(false);
