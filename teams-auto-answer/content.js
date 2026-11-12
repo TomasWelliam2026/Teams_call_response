@@ -1,6 +1,7 @@
 // Runs inside Teams web. Watches for incoming-call UI, applies auto-answer rules and
 // performs actions requested by the background worker (shortcuts / side panel buttons / the local
-// app answering through the server).
+// app answering through the server). Also arms the audio/camera bridge for a meeting once joined
+// (see checkMeetingJoin below) - a meeting has no ring to answer, so it needs its own detection.
 (() => {
   if (globalThis.__teamsCallAnswerer) return;
   globalThis.__teamsCallAnswerer = true;
@@ -72,6 +73,7 @@
       }
     }
     syncMute();
+    checkMeetingJoin();
   }
 
   function scheduleScan() {
@@ -86,6 +88,7 @@
   const pagePort = pageChannel.port1;
   let bridgePort = null;
   let bridgeCallId = null;
+  let armRequestedAt = 0; // last time *this* frame asked the background worker to arm, any reason
   const callers = new Map(); // callId -> { caller, ringId }, from the arm message
 
   function pushPageConfig() {
@@ -185,6 +188,31 @@
         .find(b => /^\s*(leave|hang up|end call)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
   }
 
+  // ---- Meetings: joined, not answered --------------------------------------------------------
+  // A call rings and gets answered (a toast with an Accept button we can watch for); a meeting has
+  // none of that - you join it yourself, from a calendar invite, a chat link, "Meet now", anywhere.
+  // There's no single action to hook, so instead this watches for the thing every live call or
+  // meeting shows once its media is up: Teams' own Leave/Mic toolbar, strictly by data-tid (unlike
+  // hangupButton()'s label fallback above, used only when we already know a call should be
+  // ending - here a label match elsewhere on the page, e.g. "Leave team", would mean false arms).
+  function callUiActive() {
+    return !!(document.querySelector('[data-tid="hangup-button"]') && document.querySelector('[data-tid="microphone-button"]'));
+  }
+
+  /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined. */
+  function meetingLabel() {
+    return document.title.replace(/^\(\d+\)\s*/, '').split('|')[0].trim() || 'Teams meeting';
+  }
+
+  /** Arms the bridge for a meeting (or a call Teams connected without our own answer detection
+   * catching it) as soon as its toolbar appears, re-trying every scan until the bridge is actually up. */
+  function checkMeetingJoin() {
+    if (!settings.bridgeEnabled || bridgeCallId || !callUiActive()) return;
+    if (Date.now() - armRequestedAt < 5000) return; // already asked; give it time to land
+    armRequestedAt = Date.now();
+    send({ type: 'bridge-arm', caller: meetingLabel() });
+  }
+
   function openBridge(callId) {
     closeBridgePort();
     bridgeCallId = callId;
@@ -276,6 +304,7 @@
 
   function personAnswered({ caller, ringId }) {
     pressed = null;
+    armRequestedAt = Date.now();
     send({ type: 'bridge-arm', caller, ringId });
   }
 
@@ -314,7 +343,7 @@
       const entry = [...tracked].find(([, t]) => t.ringId === msg.ringId);
       const call = entry && D.detectCalls(document, settings).find(c => c.container === entry[0]);
       if (!call) return;
-      if (msg.action !== 'decline') send({ type: 'bridge-arm', caller: call.caller, ringId: msg.ringId }); // arm before Teams connects
+      if (msg.action !== 'decline') { armRequestedAt = Date.now(); send({ type: 'bridge-arm', caller: call.caller, ringId: msg.ringId }); } // arm before Teams connects
       sendResponse(perform(call, msg.action === 'decline' ? 'decline' : (msg.action || 'audio')) || { ok: false, message: 'Teams has no button for that.' });
       return;
     }

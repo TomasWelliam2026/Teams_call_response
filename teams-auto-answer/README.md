@@ -80,6 +80,13 @@ From then on, the bridge starts when a person answers: by clicking **Teams' own 
 (or pressing Enter on it), or by clicking **Answer in the Call Bridge app**.
 Calls answered by the extension on its own (the side panel's Answer buttons, the shortcuts or auto-answer) are not bridged.
 Neither is a click on Decline.
+
+**Meetings work differently: there's no ring to answer, just joining one.** Instead of watching for a button
+press, the extension watches for the thing every live call or meeting shows once its media is up — Teams'
+own Leave/Mic toolbar — and arms the bridge off that. This also means it's answer-method-agnostic for
+meetings: it doesn't matter whether you joined from a calendar invite, a chat link, "Meet now", or anywhere
+else, since it's the toolbar's appearance that starts the bridge, not how you got there.
+
 When the call's audio connection is up:
 
 - Everything you'd hear from the caller is sent to the server as 16 kHz mono PCM.
@@ -91,9 +98,15 @@ If the server can't be reached or drops for good, the bridge also stops and your
 The access token is stored only on this computer (`chrome.storage.local`), not synced.
 
 How it works: `page-audio.js` runs in Teams' own page context from the first moment, to see the WebRTC connections Teams creates.
-It does nothing until a call is answered. Then it taps the remote audio tracks with Web Audio,
+It does nothing until armed. Then it taps the remote audio tracks with Web Audio,
 resamples them to 16 kHz, and swaps the outgoing microphone track (`RTCRtpSender.replaceTrack`) for one that plays the server audio.
-`content.js` relays the audio to the background worker, which holds the WebSocket (`bridge.js`).
+`content.js` relays the audio to the background worker, which holds the WebSocket (`bridge.js`), and is what decides *when* to
+arm: a trusted press on a detected call's Accept button (`personAnswered()`), the app answering remotely (`remote-answer`), or,
+for a meeting, `checkMeetingJoin()` noticing the in-call toolbar (strictly `[data-tid="hangup-button"]` +
+`[data-tid="microphone-button"]`, unlike the looser label-matching `hangupButton()` used to press End call,
+since a false match here would arm the bridge on a page that merely has a "Leave team" button somewhere).
+It keeps re-checking every scan (polled every 2 s as a MutationObserver fallback) until the bridge is actually up,
+so it also self-heals if the bridge drops while the meeting continues.
 
 > **Consent.** The bridge sends other people's voices to a server. In many places, including several US states and the EU,
 > everyone on the call must be told, or must agree, before a call is recorded or relayed. Your organization's Teams policy
@@ -216,4 +229,7 @@ once the mock's own peers are manually renegotiated (real Teams does this on its
 - Your organization may block Teams web or unapproved extensions. Auto-answering means callers may be connected before you're at the keyboard.
 - Camera control adds a video transceiver to a call that started audio-only the same way the mic bridge
   handles a muted computer: it counts on Teams renegotiating on its own in response. Verified against
-  the mock page (see above), not yet against live Teams.
+  the mock page (see above) and live Teams.
+- Meeting-join detection (`checkMeetingJoin()`) is verified against the mock page; `data-tid="hangup-button"`
+  and `data-tid="microphone-button"` themselves are confirmed against live Teams (real calls, not yet a real
+  meeting), since camera control and mute sync already depend on those same two attributes.
