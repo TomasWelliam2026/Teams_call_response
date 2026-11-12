@@ -162,6 +162,15 @@ async function main() {
     assert.deepEqual((await answered.next(isBinary)).binary, frame(6));
     console.log('ok  remote answer: ring shown, Answer reaches the extension, call routed to that operator');
 
+    // Shared mute: the app's Mute reaches the extension; the Teams computer's state reaches the app.
+    app.send(JSON.stringify({ type: 'mute', muted: true }));
+    assert.deepEqual(await answered.next(isType('mute')), { type: 'mute', muted: true });
+    answered.send(JSON.stringify({ type: 'mute-state', muted: true }));
+    assert.equal((await app.next(isType('mute-state'))).muted, true);
+    answered.send(JSON.stringify({ type: 'mute-state', muted: false })); // someone unmuted in Teams
+    assert.equal((await app.next(isType('mute-state'))).muted, false);
+    console.log('ok  mute is shared between the app and the Teams computer');
+
     station.send({ type: 'ringing', ringId: 'ring-0002-abcd', caller: 'Jane Doe' });
     await app.next(m => m.type === 'calls' && m.rings.length === 1);
     app.send(JSON.stringify({ type: 'answer', ringId: 'ring-0002-abcd' }));

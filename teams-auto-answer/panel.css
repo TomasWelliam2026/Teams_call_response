@@ -92,3 +92,46 @@ details button { margin-top: 10px; }
 .log li { padding: 3px 0; border-bottom: 1px solid var(--line); }
 .log time { color: var(--muted); margin-right: 6px; font-variant-numeric: tabular-nums; }
 .log .detail { color: var(--muted); display: block; font-size: 11px; }
+
+/* ---- 0.4 layout: connection card first, everything else under "More settings" ---- */
+header.brand { display: block; }
+.brand h1 { margin-bottom: 2px; }
+.brand .hint { margin: 0 0 4px; }
+.card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 12px; margin-top: 12px;
+  background: var(--bg);
+}
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.card-head h2 { margin: 0; }
+.card label:first-of-type { margin-top: 10px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.pill[data-state=connecting] { color: #b06000; border-color: #f9ab00; }
+.pill[data-state=connecting] .dot { background: #f9ab00; }
+.pill[data-state=connected] { color: var(--accent); border-color: var(--accent); }
+.pill[data-state=connected] .dot { background: var(--accent); }
+.pill[data-state=disconnected], .pill[data-state=invalid] { color: var(--danger); border-color: var(--danger); }
+.pill[data-state=disconnected] .dot, .pill[data-state=invalid] .dot { background: var(--danger); }
+
+.secret { display: flex; gap: 6px; }
+.secret input { flex: 1; min-width: 0; }
+input[type=password] {
+  font: inherit; width: 100%; padding: 4px 6px; border-radius: 5px;
+  border: 1px solid var(--line); background: var(--field); color: var(--fg);
+}
+button.ghost { background: none; }
+button.small { padding: 3px 8px; font-size: 12px; }
+
+.detail { margin: 8px 0 0; color: var(--muted); }
+.detail[data-state=connected] { color: var(--accent); }
+.detail[data-state=disconnected], .detail[data-state=invalid] { color: var(--danger); }
+
+.card .bridge-status { margin-top: 8px; }
+
+details.more { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+details.more summary { font-weight: 600; color: var(--fg); }
+details.more h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 6px; }

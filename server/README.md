@@ -56,9 +56,42 @@ Generate a token with `node -e "console.log(require('crypto').randomBytes(24).to
    Both tasks restart if they stop and come back after a reboot.
    The address is `https://<your-ip-with-dashes>.sslip.io` unless you pass `-Domain your.domain`.
 3. If your provider also has a network firewall (for example Hetzner Cloud Firewall), allow inbound TCP 80 and 443 there.
-4. Open `server\.env` and copy the tokens:
-   - Extension side panel: **Server URL** `wss://<domain>/call`, **Access token** = `BRIDGE_TOKEN`
-   - Operator console: open `https://<domain>/` **on your own computer**, enter `OPERATOR_TOKEN`, allow the microphone.
+4. Set up the extension and the app with the server URL and tokens (see below).
+
+### Server URL and tokens
+
+| Where | Server URL | Token |
+|---|---|---|
+| **Extension** side panel (Teams computer) | `wss://<domain>/call` | **Access token** = `BRIDGE_TOKEN` |
+| **Call Bridge app** (your own computer, in Chrome) | open `https://<domain>/` | **Operator token** = `OPERATOR_TOKEN` |
+
+`<domain>` is what `install.ps1` printed, for example `95-216-122-142.sslip.io`.
+It only changes if the server moves to another IP or you pass `-Domain`.
+
+Both tokens are in `server\.env`. Only administrators can read that file. To get a token without showing it
+on screen, run one of these in **PowerShell → Run as administrator** on the VPS, then paste it with Ctrl+V.
+Remote Desktop shares the clipboard with your own computer.
+
+```powershell
+# Extension token
+(Get-Content server\.env | Where-Object { $_ -like 'BRIDGE_TOKEN=*' }) -replace '^BRIDGE_TOKEN=', '' | Set-Clipboard
+# App token
+(Get-Content server\.env | Where-Object { $_ -like 'OPERATOR_TOKEN=*' }) -replace '^OPERATOR_TOKEN=', '' | Set-Clipboard
+```
+
+Run them from the repository folder, or put the full path to `server\.env` in place of `server\.env`.
+Or open `server\.env` in Notepad started with **Run as administrator** (File → Open, file type **All Files**)
+and copy the part after `=`.
+
+For the extension you can skip typing. Put a `bridge-config.json` with the URL and `BRIDGE_TOKEN` next to its
+`manifest.json` (see the extension README), and it fills both fields in when it's loaded or reloaded.
+
+`tools\package-extension.ps1` builds two packages:
+- **`dist\teams-call-answerer-extension.zip`**: no token, safe to share or commit. Enter the URL and token in the panel.
+- **`dist\private\teams-call-answerer-extension-with-token.zip`**: includes `bridge-config.json`. It's git-ignored; never commit or share it.
+
+Treat both tokens like passwords. To change them, delete `server\.env`, run `install.ps1` again, and enter
+the new tokens in the extension and the app.
 
 The server has no window of its own; it runs invisibly in the background. To see it, double-click
 `server\monitor.bat`. It shows whether both tasks run, how many Teams computers and Call Bridge apps
@@ -105,9 +138,11 @@ Plug your own handler in here, for example a speech bot, instead of the operator
 1. The client sends text: `{"type":"hello","token":"…","callId":"<uuid>","caller":"Jane Doe","format":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1,"frameMs":20},"client":"teams-call-answerer/0.2.0"}`
 2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence"}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s.
 3. Both directions then carry **binary** frames: PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes).
-4. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
+4. Mute is shared. The server sends `{"type":"mute","muted"}` when the app presses Mute.
+   The extension presses Teams' own Mute button and answers with `{"type":"mute-state","muted"}`, which it also sends when someone mutes in Teams.
+5. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
    then gives the microphone back to Teams. The client sends `{"type":"end","reason":"…"}` when the call ends.
-5. `{"type":"hello",…,"test":true}` is answered with `ready` and closed. The side panel's **Test connection** button uses it.
+6. `{"type":"hello",…,"test":true}` is answered with `ready` and closed.
 
 If the extension's connection drops mid-call, it reconnects with the same `callId` up to 3 times.
 The server keeps the session, and its operator, for 15 s.
@@ -120,8 +155,9 @@ A `/call` hello that carries the answered `ringId` is routed to the operator who
 
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
 sends `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
-The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"release"}`
-or `{"type":"stop","callId"}`.
+The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"mute","muted"}`,
+`{"type":"release"}` or `{"type":"stop","callId"}`. The server sends `{"type":"mute-state","callId","muted"}`
+whenever the Teams computer's mute changes.
 Binary frames use the same PCM format.
 
 ## Test

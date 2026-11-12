@@ -25,6 +25,14 @@ const notes = new Map(); // ringId -> Notification
 
 function setStatus(text) { $('status').textContent = text; }
 
+/** While muted nothing from this microphone is sent (see startCall). */
+function setMuted(value) {
+  muted = !!value;
+  $('mute').setAttribute('aria-pressed', muted);
+  $('mute').textContent = muted ? 'Unmute' : 'Mute';
+  if (active) setStatus(muted ? `Muted — ${active.caller} can't hear you.` : `Talking to ${active.caller}.`);
+}
+
 const storage = {
   get() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } },
   set(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ } },
@@ -84,7 +92,8 @@ function connect() {
         $('main').hidden = false;
         break;
       case 'calls': render(msg); break;
-      case 'taken': answering = null; startCall(msg.callId, msg.caller); break;
+      case 'taken': answering = null; startCall(msg.callId, msg.caller, !!msg.muted); break;
+      case 'mute-state': if (active?.callId === msg.callId) setMuted(msg.muted); break;
       case 'released': endCall(`Call ended: ${msg.reason.replace(/\.$/, '')}.`); break;
       case 'error': answering = null; setStatus(msg.message); renderRings(); break;
     }
@@ -240,9 +249,10 @@ function updateRinging(next) {
 
 // ---- Call audio -------------------------------------------------------------------------------
 
-async function startCall(callId, caller) {
+async function startCall(callId, caller, startMuted = false) {
   endCall();
   active = { callId, caller, since: Date.now() };
+  setMuted(startMuted);
   updateRinging(rings);
   $('active').hidden = false;
   $('activeCaller').textContent = caller;
@@ -258,7 +268,7 @@ async function startCall(callId, caller) {
     tap.onaudioprocess = (e) => toPcm(e.inputBuffer.getChannelData(0));
     src.connect(lowpass).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
     audio = { ctx, stream, nextTime: 0 };
-    setStatus(`Talking to ${caller}.`);
+    setMuted(muted); // shows "Talking to …" or "Muted …"
   } catch (err) {
     setStatus(`${micProblem(err)} You can still listen.`);
     const ctx = new AudioContext();
@@ -275,6 +285,7 @@ function endCall(message) {
   }
   const wasActive = !!active;
   active = null;
+  setMuted(false); // the next call starts unmuted unless the Teams computer says otherwise
   clearTimeout(clock);
   $('active').hidden = true;
   if (wasActive) updateRinging(rings);
@@ -339,10 +350,12 @@ $('signOut').addEventListener('click', () => {
   storage.set('');
   ws?.close();
 });
+// Mute is shared with the Teams computer: the app stops sending at once, and the extension presses
+// Teams' own Mute there. Muting in Teams comes back as 'mute-state' and updates this button.
 $('mute').addEventListener('click', () => {
-  muted = !muted;
-  $('mute').setAttribute('aria-pressed', muted);
-  $('mute').textContent = muted ? 'Unmute' : 'Mute';
+  const next = !muted;
+  setMuted(next);
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute', muted: next }));
 });
 $('release').addEventListener('click', () => ws.send(JSON.stringify({ type: 'release' })));
 $('handBack').addEventListener('click', () => {

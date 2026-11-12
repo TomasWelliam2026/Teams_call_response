@@ -71,6 +71,7 @@
         t.timer = setTimeout(() => autoAnswer(call.container), Math.max(0, Number(settings.delaySec) || 0) * 1000);
       }
     }
+    syncMute();
   }
 
   function scheduleScan() {
@@ -97,14 +98,69 @@
     bridgeCallId = null;
   }
 
+  // ---- Mute, shared between the local app and Teams ----------------------------------------
+  // While bridged, the caller hears the app user, so Teams' own Mute button must silence the bridge,
+  // and the app's Mute presses Teams' button so Teams (and the caller) show the call as muted.
+  // Teams' in-call button: data-tid="microphone-button", label "Mute mic" / "Unmute mic".
+  let appMuted = false;     // last request from the app
+  let appChangedAt = 0;
+  let seenTeams = null;     // Teams' button state as last seen, and when it last changed
+  let teamsChangedAt = 0;
+  let reportedMute = null;  // last state sent to the page and the server
+
+  function micButton() {
+    return document.querySelector('[data-tid="microphone-button"]')
+      || [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => /^\s*(un)?mute\b.*\b(mic|microphone)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
+  }
+
+  /** Teams' mute state, or null when its button is missing or disabled (e.g. no microphone on this computer). */
+  function teamsMuted() {
+    const btn = micButton();
+    if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return null;
+    const label = btn.getAttribute('aria-label') || btn.title || '';
+    if (/^\s*unmute\b/i.test(label)) return true;
+    if (/^\s*mute\b/i.test(label)) return false;
+    return null;
+  }
+
+  function syncMute() {
+    if (!bridgeCallId) return;
+    const teams = teamsMuted();
+    if (teams !== seenTeams) { seenTeams = teams; teamsChangedAt = Date.now(); }
+    // The most recent action wins. Normally the app's request flips Teams' button and both agree;
+    // if Teams refuses to change (e.g. "Teams couldn't unmute"), the app's newer request still counts.
+    const muted = teams === null || appChangedAt > teamsChangedAt ? appMuted : teams;
+    if (muted === reportedMute) return;
+    reportedMute = muted;
+    pagePort.postMessage({ type: 'mute', callId: bridgeCallId, muted });
+    bridgePort?.postMessage({ type: 'mute-state', muted });
+  }
+
+  function appSetMute(muted) {
+    appMuted = muted;
+    appChangedAt = Date.now();
+    const current = teamsMuted();
+    if (current !== null && current !== muted) micButton().click();
+    syncMute();
+    setTimeout(syncMute, 300); // Teams relabels its button shortly after the click
+  }
+
   function openBridge(callId) {
     closeBridgePort();
     bridgeCallId = callId;
+    appMuted = false;
+    appChangedAt = 0;
+    seenTeams = null;
+    teamsChangedAt = 0;
+    reportedMute = null;
     bridgePort = chrome.runtime.connect({ name: 'bridge' });
     bridgePort.onMessage.addListener((msg) => {
       if (msg.type === 'audio') {
         const pcm = B.fromBase64(msg.data);
         pagePort.postMessage({ type: 'audio', callId, pcm }, [pcm]);
+      } else if (msg.type === 'mute') {
+        appSetMute(!!msg.muted);
       } else if (msg.type === 'stop') {
         pagePort.postMessage({ type: 'stop', callId, reason: msg.reason });
       }
@@ -117,6 +173,7 @@
       bridgeCallId = null;
     });
     bridgePort.postMessage({ type: 'start', callId, ...callers.get(callId) });
+    syncMute(); // tell the app whether Teams is muted right now
   }
 
   pagePort.onmessage = ({ data }) => {

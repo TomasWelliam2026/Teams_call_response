@@ -39,13 +39,27 @@ They're registered as **global**, so they work even when the browser isn't focus
 Change them at `chrome://extensions/shortcuts`. Make sure the scope says **Global**.
 Chrome only allows Ctrl+Shift+0–9 for global shortcuts.
 
+## Connecting to the server
+
+Open the side panel and enter the **Server URL** (`wss://your-server/call`) and the **Access token**.
+The token is `BRIDGE_TOKEN` from `server\.env` on the server. See **Server URL and tokens** in
+[`server/README.md`](../server/README.md) for how to copy it.
+That's the whole setup: the extension connects as soon as both are valid.
+The status badge next to "Server connection" shows **Not set up**, **Connecting…**, **Connected** or **Disconnected**.
+Disconnected comes with the reason, for example a rejected token, and the extension keeps retrying.
+The other options are under **More settings**.
+
 ## Answering from your own computer
 
-With the bridge on, the extension keeps an always-on link to the server.
-The side panel shows it as **Server link: connected**.
+Once connected, the extension keeps an always-on link to the server.
 Every Teams call that rings here also rings in the **Call Bridge app** on your computer (see `server/README.md`).
 Clicking **Answer** there makes the extension press Teams' Answer button and starts the bridge with the call routed to you.
 **Decline** presses Teams' Decline.
+
+**Mute is shared.** **Mute** in the app also presses Teams' **Mute mic** on the Teams computer and silences the bridge, so the caller sees and hears you as muted.
+**Mute** pressed in Teams on the Teams computer also silences the bridge and shows as muted in the app.
+Unmute works the same way in both places.
+If the Teams computer has no microphone, Teams' button is disabled, and the app's Mute alone decides.
 
 **Setting up a Teams computer without typing secrets:** put a `bridge-config.json` next to `manifest.json`:
 
