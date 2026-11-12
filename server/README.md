@@ -18,7 +18,9 @@ What the server does with a call:
 - **You answer it in the app.** The call goes straight to you.
 - **An operator takes it.** A call answered on the Teams computer itself shows under **Live calls**.
   Any signed-in app can click **Take call**.
-  **Hand back to Teams computer** stops the bridge, and the person at the Teams computer gets the call back.
+  **Hand back to Teams computer** stops the bridge only; the call keeps going and the person at the
+  Teams computer gets it back. **End call** instead actually hangs up on the Teams computer too — it
+  presses Teams' own Leave button there, so the call ends for everyone, not just for the bridge.
 - **Nobody takes it.** `FALLBACK=silence` (default) sends silence. `FALLBACK=echo` plays the caller's
   own audio back, which is useful for testing.
 
@@ -32,6 +34,11 @@ either way. Unlike audio (relayed as raw bytes through this server), video trave
 WebRTC connection between the app and the extension, only *signaled* through this server; the actual
 media needs a TURN relay to cross networks, which is what `turn-server.js` is for (see below). Stopping
 the camera, or the call ending, hands the video sender back to whatever Teams had there.
+
+Turning the camera on or off is also shared with Teams, the same way mute already is: the extension
+presses Teams' own Camera button to match, so Teams (and the caller) see the call as having video.
+It only presses that button on behalf of the app's own camera session — never a camera the person at
+the Teams computer turned on themselves.
 
 ## Run
 
@@ -188,7 +195,8 @@ A `/call` hello that carries the answered `ringId` is routed to the operator who
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
 sends `{"type":"ready","iceServers":[…]}` then `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
 The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"mute","muted"}`,
-`{"type":"release"}` or `{"type":"stop","callId"}`. The server sends `{"type":"mute-state","callId","muted"}`
+`{"type":"release"}`, `{"type":"stop","callId"}` (hand the bridge back) or `{"type":"end-call","callId"}`
+(hang up on the Teams computer too). The server sends `{"type":"mute-state","callId","muted"}`
 whenever the Teams computer's mute changes.
 Binary frames use the same PCM format.
 Camera control (`callId` required, so the server knows which `/call` to relay to): the client sends

@@ -175,6 +175,14 @@
     let vpc = null;              // RTCPeerConnection to the operator app, receiving its camera only
     let operatorVideoTrack = null;
     const videoTransceivers = new Map(); // sender -> { transceiver, originalDirection }, so stopVideo() reverts only these
+    let reportedVideoActive = null; // last 'video-state' sent, so content.js can sync Teams' own camera button
+
+    function reportVideoState() {
+      const active = !!operatorVideoTrack;
+      if (active === reportedVideoActive) return;
+      reportedVideoActive = active;
+      post({ type: 'video-state', active });
+    }
 
     function applyVideo() {
       if (!operatorVideoTrack) return;
@@ -183,6 +191,7 @@
         if (!videoTransceivers.has(t.sender)) videoTransceivers.set(t.sender, { transceiver: t, originalDirection: t.direction });
         inject(t, operatorVideoTrack);
       }
+      reportVideoState();
     }
 
     async function startVideo(sdp) {
@@ -218,6 +227,7 @@
         if (transceiver.direction !== originalDirection) transceiver.direction = originalDirection;
       }
       videoTransceivers.clear();
+      reportVideoState();
       if (reason) post({ type: 'log', message: reason });
     }
 

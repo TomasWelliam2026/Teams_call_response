@@ -415,6 +415,9 @@ $('camera').addEventListener('click', () => (camera ? stopCamera() : startCamera
 $('handBack').addEventListener('click', () => {
   if (active) ws.send(JSON.stringify({ type: 'stop', callId: active.callId }));
 });
+$('endCall').addEventListener('click', () => {
+  if (active) ws.send(JSON.stringify({ type: 'end-call', callId: active.callId }));
+});
 // Any click makes later ringing audible (Chrome blocks sound until the user has interacted).
 document.addEventListener('pointerdown', unlockSound);
 

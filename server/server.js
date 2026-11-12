@@ -260,6 +260,9 @@ function onOperatorSocket(ws) {
       case 'stop': // hand the call back to the person at the Teams computer
         if (call) { sendJson(call.ws, { type: 'stop', reason: 'An operator handed the call back.' }); endCall(call, 'operator handed it back'); }
         break;
+      case 'end-call': // actually hang up, not just hand the bridge back
+        if (call) { sendJson(call.ws, { type: 'end-call' }); endCall(call, 'operator ended the call'); }
+        break;
       case 'video-offer':
       case 'video-ice':
       case 'video-stop': // camera control signaling: the operator is the offerer, relay to the extension
