@@ -339,7 +339,9 @@ const server = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+// perMessageDeflate defaults to on in `ws`; compressing every 20 ms audio frame adds CPU work and
+// jitter for no benefit (PCM doesn't compress well), which was contributing to choppy audio.
+const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket };
 
 const WHO = { '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer' };

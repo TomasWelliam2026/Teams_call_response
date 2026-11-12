@@ -4,8 +4,8 @@
 // (PCM s16le, mono, 16 kHz, 20 ms frames).
 const RATE = 16000;
 const FRAME = 320;
-const START_BUFFER_S = 0.08;
-const MAX_AHEAD_S = 0.6;
+const START_BUFFER_S = 0.25; // over two WAN hops (Teams computer -> server -> here), 80 ms was too thin and caused cutouts
+const MAX_AHEAD_S = 1.2;
 const TOKEN_KEY = 'callBridge.operatorToken';
 const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
