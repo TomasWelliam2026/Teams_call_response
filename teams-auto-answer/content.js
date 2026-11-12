@@ -146,6 +146,45 @@
     setTimeout(syncMute, 300); // Teams relabels its button shortly after the click
   }
 
+  // ---- Camera control, shared with Teams the same way mute is ------------------------------
+  // The app's "Take full control (camera)" turns Teams' own Camera button on, so Teams (and the
+  // caller) show the call as having video; stopping it turns Teams' button back off, but only if
+  // we were the one who turned it on, so we never touch a camera the person enabled themselves.
+  let weEnabledCamera = false;
+
+  function cameraButton() {
+    return document.querySelector('[data-tid="camera-button"]')
+      || [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => /^\s*turn camera (on|off)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
+  }
+
+  /** Teams' camera state, or null when its button is missing or disabled. */
+  function teamsCameraOn() {
+    const btn = cameraButton();
+    if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return null;
+    const label = btn.getAttribute('aria-label') || btn.title || '';
+    if (/^\s*turn camera off\b/i.test(label)) return true; // offers to turn it off -> it's on
+    if (/^\s*turn camera on\b/i.test(label)) return false;
+    return null;
+  }
+
+  function syncCameraState(active) {
+    const current = teamsCameraOn();
+    if (active) {
+      if (current === false) { cameraButton().click(); weEnabledCamera = true; }
+    } else if (weEnabledCamera) {
+      weEnabledCamera = false;
+      if (current === true) cameraButton()?.click();
+    }
+  }
+
+  // ---- Ending the call for real, not just handing the bridge back --------------------------
+  function hangupButton() {
+    return document.querySelector('[data-tid="hangup-button"]')
+      || [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => /^\s*(leave|hang up|end call)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
+  }
+
   function openBridge(callId) {
     closeBridgePort();
     bridgeCallId = callId;
@@ -154,6 +193,7 @@
     seenTeams = null;
     teamsChangedAt = 0;
     reportedMute = null;
+    weEnabledCamera = false;
     bridgePort = chrome.runtime.connect({ name: 'bridge' });
     bridgePort.onMessage.addListener((msg) => {
       if (msg.type === 'audio') {
@@ -168,6 +208,9 @@
       } else if (msg.type === 'video-offer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
         // Camera control (see page-audio.js): just relay the signaling, opaque here.
         pagePort.postMessage({ ...msg, callId });
+      } else if (msg.type === 'end-call') {
+        // The app pressed "End call": actually hang up here, not just hand the bridge back.
+        hangupButton()?.click();
       }
     });
     // Server unreachable or worker gone: hand the microphone back to Teams.
@@ -206,6 +249,9 @@
       case 'video-ice':
         // The page answered (or trickled ICE for) the operator's camera offer; send it on.
         if (bridgePort) bridgePort.postMessage(data);
+        break;
+      case 'video-state':
+        syncCameraState(data.active);
         break;
     }
   };

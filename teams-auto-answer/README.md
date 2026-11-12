@@ -111,7 +111,18 @@ How it works: `page-audio.js` answers that WebRTC offer and, once the app's came
 swaps it into the call's video sender the same way it swaps in the mic-bridge audio — `replaceTrack`,
 forcing the transceiver to `sendrecv` first if Teams had it as `recvonly` or hadn't negotiated video at
 all (same trick, same caveat, as the mic-bridge: it relies on Teams reacting to the resulting
-renegotiation). Stopping the camera, or the call ending, puts back whatever track was there before.
+renegotiation). Stopping the camera, or the call ending, puts back whatever track was there before —
+and also puts the transceiver's direction back, since a `null` track alone leaves the far end showing
+a frozen last frame rather than reverting (no "track ended" signal reaches it otherwise).
+
+Camera on/off is shared with Teams the same way mute already is (`content.js`): turning the app's
+camera control on presses Teams' own Camera button so Teams and the caller see the call as having
+video, and turning it off presses that button back — but only if the extension was the one that
+pressed it on in the first place, never a camera the person at the Teams computer turned on themselves.
+
+**Ending the call for real.** The app's **Hand back to Teams computer** only releases the bridge; the
+call itself keeps going. **End call** instead has the extension press Teams' own Leave/Hang up button
+(`content.js`'s `hangupButton()`), ending the call on the Teams computer too.
 
 ## Auto-answer rules
 

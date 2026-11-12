@@ -7,6 +7,7 @@
 //                              {type:'mute-state', muted} | {type:'video-answer'|'video-ice'|'video-stop', ...}
 //   server -> extension  text  {type:'ready', iceServers} | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
 //                              | {type:'video-offer'|'video-ice'|'video-stop', ...}  (camera control, see page-audio.js)
+//                              | {type:'end-call'}  (the app pressed "End call": actually hang up, not just release the bridge)
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
 //
 // video-* messages are opaque here: just relayed between the port and the socket as-is, so the
@@ -94,7 +95,7 @@
           finish(msg.reason || 'The server ended the bridge.');
         } else if (msg.type === 'error') {
           finish(msg.message || 'The server reported an error.', true);
-        } else if (msg.type === 'video-offer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
+        } else if (msg.type === 'video-offer' || msg.type === 'video-ice' || msg.type === 'video-stop' || msg.type === 'end-call') {
           toPort(msg);
         }
       };

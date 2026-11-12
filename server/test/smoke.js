@@ -183,6 +183,14 @@ async function main() {
     await app.next(isType('video-stop'));
     console.log('ok  camera-control signaling is relayed between the operator and the extension');
 
+    // End call: unlike "stop" (hand the bridge back), this tells the extension to actually hang up,
+    // and ends the call on the server the same way the extension saying goodbye would.
+    app.send(JSON.stringify({ type: 'end-call', callId: 'call-0003-abcd' }));
+    assert.equal((await answered.next(isType('end-call'))).type, 'end-call');
+    await app.next(isType('released'));
+    await app.next(m => m.type === 'calls' && m.calls.length === 0);
+    console.log('ok  end call reaches the extension and ends the call on the server');
+
     station.send({ type: 'ringing', ringId: 'ring-0002-abcd', caller: 'Jane Doe' });
     await app.next(m => m.type === 'calls' && m.rings.length === 1);
     app.send(JSON.stringify({ type: 'answer', ringId: 'ring-0002-abcd' }));
