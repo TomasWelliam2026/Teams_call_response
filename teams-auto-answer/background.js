@@ -157,7 +157,7 @@ async function updateRings(fn) {
 }
 
 const station = Bridge.createStation({
-  getConfig: async () => ({ ...(await getBridgeConfig()), enabled: (await getSettings()).bridgeEnabled }),
+  getConfig: async () => ({ ...(await getBridgeConfig()), enabled: true }), // connects once URL and token are set
   onStatus: (s) => chrome.storage.session.set({ stationStatus: { ...s, time: Date.now() } }),
   onOpen: async () => {
     for (const r of Object.values(await getRings())) station.send({ type: 'ringing', ringId: r.ringId, caller: r.caller });
@@ -209,7 +209,8 @@ async function reloadTeamsTabs() {
 
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.sync.get(null);
-  await chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored });
+  // bridgeEnabled has no switch any more (0.4): entering the server URL and token is the whole setup.
+  await chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored, bridgeEnabled: true });
   await applyProvisionedConfig();
   await refreshBadge();
   await keepTeamsTabsAlive();

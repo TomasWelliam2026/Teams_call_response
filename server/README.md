@@ -105,9 +105,11 @@ Plug your own handler in here, for example a speech bot, instead of the operator
 1. The client sends text: `{"type":"hello","token":"…","callId":"<uuid>","caller":"Jane Doe","format":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1,"frameMs":20},"client":"teams-call-answerer/0.2.0"}`
 2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence"}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s.
 3. Both directions then carry **binary** frames: PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes).
-4. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
+4. Mute is shared. The server sends `{"type":"mute","muted"}` when the app presses Mute.
+   The extension presses Teams' own Mute button and answers with `{"type":"mute-state","muted"}`, which it also sends when someone mutes in Teams.
+5. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
    then gives the microphone back to Teams. The client sends `{"type":"end","reason":"…"}` when the call ends.
-5. `{"type":"hello",…,"test":true}` is answered with `ready` and closed. The side panel's **Test connection** button uses it.
+6. `{"type":"hello",…,"test":true}` is answered with `ready` and closed.
 
 If the extension's connection drops mid-call, it reconnects with the same `callId` up to 3 times.
 The server keeps the session, and its operator, for 15 s.
@@ -120,8 +122,9 @@ A `/call` hello that carries the answered `ringId` is routed to the operator who
 
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
 sends `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
-The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"release"}`
-or `{"type":"stop","callId"}`.
+The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"mute","muted"}`,
+`{"type":"release"}` or `{"type":"stop","callId"}`. The server sends `{"type":"mute-state","callId","muted"}`
+whenever the Teams computer's mute changes.
 Binary frames use the same PCM format.
 
 ## Test
