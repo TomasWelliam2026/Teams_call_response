@@ -6,7 +6,7 @@ without you touching the Teams window:
 - **Global shortcuts** that work in any app: answer with audio, answer with video, decline, toggle auto-answer.
 - **Auto-answer rules**: ring delay, audio or video, allow list, block list, active hours and days.
 - **Side panel** (opens on the right of the browser when you click the toolbar icon) with answer/decline buttons, settings, recent activity and a "Scan Teams tab" diagnostic.
-- **Audio bridge** (optional): once a call is answered, the caller's audio streams to your online server
+- **Audio bridge** (optional): when you answer a call with Teams' own Answer button, the caller's audio streams to your online server
   and the server's audio is sent to the caller in place of your microphone. The server is in [`../server`](../server/README.md).
 - Keeps Teams tabs from being put to sleep so calls aren't missed.
 
@@ -39,6 +39,22 @@ They're registered as **global**, so they work even when the browser isn't focus
 Change them at `chrome://extensions/shortcuts`. Make sure the scope says **Global**.
 Chrome only allows Ctrl+Shift+0–9 for global shortcuts.
 
+## Answering from your own computer
+
+With the bridge on, the extension keeps an always-on link to the server.
+The side panel shows it as **Server link: connected**.
+Every Teams call that rings here also rings in the **Call Bridge app** on your computer (see `server/README.md`).
+Clicking **Answer** there makes the extension press Teams' Answer button and starts the bridge with the call routed to you.
+**Decline** presses Teams' Decline.
+
+**Setting up a Teams computer without typing secrets:** put a `bridge-config.json` next to `manifest.json`:
+
+```json
+{ "serverUrl": "wss://your-server/call", "token": "<BRIDGE_TOKEN>", "enabled": true }
+```
+
+The extension applies it when it's installed or reloaded. The file is git-ignored because it holds a secret.
+
 ## Audio bridge
 
 1. Deploy the server (see [`server/README.md`](../server/README.md)) and note its URL and `BRIDGE_TOKEN`.
@@ -46,7 +62,10 @@ Chrome only allows Ctrl+Shift+0–9 for global shortcuts.
    click **Test connection**, then tick **Stream answered calls to my server**.
 3. Reload the Teams tab once, so the extension's audio hook loads before Teams starts.
 
-From then on, pressing a Teams accept button on a ringing call starts the bridge, whether you click it or a shortcut or auto-answer does.
+From then on, the bridge starts when a person answers: by clicking **Teams' own Answer button** on a ringing call
+(or pressing Enter on it), or by clicking **Answer in the Call Bridge app**.
+Calls answered by the extension on its own (the side panel's Answer buttons, the shortcuts or auto-answer) are not bridged.
+Neither is a click on Decline.
 When the call's audio connection is up:
 
 - Everything you'd hear from the caller is sent to the server as 16 kHz mono PCM.
@@ -121,7 +140,7 @@ To test the bridge, start the server with `FALLBACK=echo BRIDGE_TOKEN=local-dev-
 
 ```js
 __bridgeConfig = { serverUrl: 'ws://localhost:8787/call', token: 'local-dev-token-not-secret' };
-chrome.storage.sync.set({ bridgeEnabled: true }); __ringFluent('Jane Doe');   // then click the green accept button
+chrome.storage.sync.set({ bridgeEnabled: true }); __ringFluent('Jane Doe');   // then click the accept button yourself (a script .click() doesn't start the bridge)
 await __callerHears();   // bridged: echo440 loud, mic220 silent. After "Stop bridge" or hang-up: the reverse.
 ```
 To drive it from the browser console:

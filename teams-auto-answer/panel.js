@@ -10,12 +10,25 @@ const BRIDGE_LABELS = {
   live: 'Live', reconnecting: 'Reconnecting…', ended: 'Ended', error: 'Error',
 };
 
-function save(patch) {
-  return chrome.storage.sync.set(patch);
-}
-
 function setStatus(text) {
   $('status').textContent = text;
+}
+
+// A panel left open while the extension is reloaded can no longer save, and Chrome doesn't say so.
+const STALE = 'This panel is out of date (the extension was reloaded). Close it and open it again, then re-enter the change.';
+
+async function store(area, patch) {
+  try {
+    await chrome.storage[area].set(patch);
+  } catch {
+    setStatus(STALE);
+    $('status').classList.add('error');
+    throw new Error(STALE);
+  }
+}
+
+function save(patch) {
+  return store('sync', patch);
 }
 
 /**
@@ -27,7 +40,7 @@ async function saveBridgeFields() {
   const url = $('serverUrl').value.trim();
   const problem = url ? checkServerUrl(url) : null;
   if (!problem) await save({ serverUrl: url });
-  await chrome.storage.local.set({ bridgeToken: $('bridgeToken').value.trim() });
+  await store('local', { bridgeToken: $('bridgeToken').value.trim() });
   return problem;
 }
 
@@ -180,8 +193,23 @@ function renderBridge() {
 
 chrome.storage.session.get('bridgeStatus').then(({ bridgeStatus: st }) => { bridgeStatus = st; renderBridge(); });
 
+const STATION_LABELS = {
+  off: 'Server link: off (turn on streaming and set the server)',
+  connecting: 'Server link: connecting…',
+  connected: 'Server link: connected — the local app can see and answer calls',
+  disconnected: 'Server link: disconnected',
+};
+
+function renderStation(st = { state: 'off' }) {
+  $('stationStatus').dataset.state = st.state;
+  $('stationText').textContent = STATION_LABELS[st.state] + (st.state === 'disconnected' && st.reason ? ` — ${st.reason}` : '');
+}
+
+chrome.storage.session.get('stationStatus').then(({ stationStatus }) => renderStation(stationStatus));
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.bridgeStatus) { bridgeStatus = changes.bridgeStatus.newValue; renderBridge(); }
+  if (area === 'session' && changes.stationStatus) renderStation(changes.stationStatus.newValue);
   if (area === 'local' && changes.log) renderLog();
   if (area === 'sync' && changes.enabled) $('enabled').checked = changes.enabled.newValue;
 });

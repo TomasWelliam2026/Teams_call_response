@@ -21,7 +21,20 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { color: var(--danger); }
 button[aria-pressed=true] { background: var(--danger); border-color: var(--danger); color: #fff; }
 .status { color: var(--muted); min-height: 1.5em; }
+.mic { margin: 0; }
+.mic[data-ok=true] { color: var(--accent); }
+.mic[data-ok=false] { color: var(--danger); font-weight: 600; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
 .card.live { border-color: var(--accent); }
 .calls { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .calls li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+label.check { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+label.check input { flex: none; }
+.stations { margin: 0 0 4px; }
+.stations[data-ok=true] { color: var(--accent); }
+.stations[data-ok=false] { color: var(--danger); font-weight: 600; }
+.card.ring { border-color: var(--accent); border-width: 2px; flex-wrap: wrap; }
+.card.ring .row { margin-top: 0; }
+button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; }
+button:disabled { opacity: .55; cursor: default; }

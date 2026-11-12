@@ -1,14 +1,24 @@
 # Call Bridge Server
 
-The online half of the Teams Call Answerer. After a Teams call is answered, the extension connects
-here over a WebSocket and streams the call's audio. The server sends audio back, and the extension
-plays it to the caller in place of the microphone.
+The online middle of three machines:
+
+| Machine | Runs |
+|---|---|
+| **VPS** | This server (always on, HTTPS) |
+| **Teams computer** | Chrome + Teams web + the extension, linked to the server |
+| **Your computer** | The **Call Bridge app** (`https://your-server/`, installable) |
+
+When Teams rings on the Teams computer, the extension tells the server, and the Call Bridge app rings.
+Click **Answer** in the app: the extension answers in Teams and the call's audio is routed to you.
+You hear the caller on your computer's speakers, and your microphone goes to the caller.
+All of it is relayed live, in 20 ms frames.
 
 What the server does with a call:
 
-- **An operator takes it.** A person opens the console (`https://your-server/`), enters the operator
-  token and clicks **Take call**. They hear the caller, and their microphone goes to the caller.
-  **Hand back to Teams user** stops the bridge, and the person at the Teams computer gets the call back.
+- **You answer it in the app.** The call goes straight to you.
+- **An operator takes it.** A call answered on the Teams computer itself shows under **Live calls**.
+  Any signed-in app can click **Take call**.
+  **Hand back to Teams computer** stops the bridge, and the person at the Teams computer gets the call back.
 - **Nobody takes it.** `FALLBACK=silence` (default) sends silence. `FALLBACK=echo` plays the caller's
   own audio back, which is useful for testing.
 
@@ -26,11 +36,33 @@ BRIDGE_TOKEN=<random secret, 16+ chars> npm start
 | `BRIDGE_TOKEN` | (required) | Secret the extension sends. Paste it into the side panel's **Access token** field. |
 | `OPERATOR_TOKEN` | `BRIDGE_TOKEN` | Secret for the operator console. Set a different one so console users can't impersonate the extension. |
 | `PORT` | `8080` | HTTP/WebSocket port |
+| `HOST` | `0.0.0.0` | Interface to listen on. Use `127.0.0.1` when a local HTTPS proxy is the only way in. |
 | `FALLBACK` | `silence` | `silence` or `echo` for calls no operator has taken |
 
 Generate a token with `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`.
 
-## Deploy online
+## Deploy on a Windows VPS (always on, HTTPS, no domain needed)
+
+1. Put `caddy.exe` (Windows amd64, from https://github.com/caddyserver/caddy/releases) in `server\bin\`.
+2. Open PowerShell with **Run as administrator** and run:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File server\deploy\windows\install.ps1
+   ```
+
+   The script creates `server\.env` with two new secrets, opens TCP 80 and 443 in Windows Firewall,
+   and registers two startup tasks running as SYSTEM: **CallBridge Server** (Node, only on 127.0.0.1)
+   and **CallBridge HTTPS** (Caddy with a free Let's Encrypt certificate). It then checks the site.
+   Both tasks restart if they stop and come back after a reboot.
+   The address is `https://<your-ip-with-dashes>.sslip.io` unless you pass `-Domain your.domain`.
+3. If your provider also has a network firewall (for example Hetzner Cloud Firewall), allow inbound TCP 80 and 443 there.
+4. Open `server\.env` and copy the tokens:
+   - Extension side panel: **Server URL** `wss://<domain>/call`, **Access token** = `BRIDGE_TOKEN`
+   - Operator console: open `https://<domain>/` **on your own computer**, enter `OPERATOR_TOKEN`, allow the microphone.
+
+Logs are in `server\logs\`. Remove everything with `server\deploy\windows\uninstall.ps1`.
+
+## Deploy elsewhere
 
 The server must be reachable over **TLS** (`wss://`), because the extension refuses plain `ws://`
 for anything but localhost, and the console's microphone needs `https://`.
@@ -45,6 +77,17 @@ docker run -p 8080:8080 -e BRIDGE_TOKEN=... call-bridge
 Then put the URL `wss://<your-host>/call` in the extension's side panel. If your platform has an idle
 timeout, make sure it allows WebSockets. The server pings every 20 s to keep connections open.
 `GET /healthz` returns `{ ok: true, calls: n }` for health checks.
+
+## The Call Bridge app (your computer)
+
+1. On your own computer, open `https://<your-server>/` in Chrome or Edge.
+2. Enter the operator token, keep **Remember on this computer** ticked, and click **Connect**.
+   Allow the microphone and notifications.
+3. Click **Install app** (or the install icon in the address bar). Call Bridge now has its own window and taskbar icon.
+   To start it with Windows, open `chrome://apps`, right-click **Call Bridge**, and choose **Start app when you sign in**.
+
+The app reconnects by itself after a network drop or a server restart. "Teams computer linked" shows that the extension is online.
+Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
 
 ## Protocol
 
@@ -62,9 +105,16 @@ Plug your own handler in here, for example a speech bot, instead of the operator
 If the extension's connection drops mid-call, it reconnects with the same `callId` up to 3 times.
 The server keeps the session, and its operator, for 15 s.
 
-**`/operator`**, used by the console: the client sends `{"type":"hello","token":"…"}`. The server
-sends `{"type":"calls","calls":[…],"mine":id}` whenever calls change. The client can send
-`{"type":"take","callId"}`, `{"type":"release"}` or `{"type":"stop","callId"}`.
+**`/station`**, the extension's always-on link, authenticated with `BRIDGE_TOKEN`:
+the client sends `{"type":"hello","role":"station","token"}`, then `{"type":"ringing","ringId","caller"}`,
+`{"type":"ring-ended","ringId"}`, `{"type":"answer-result","ringId","ok","message"}` and `{"type":"ping"}`
+every 20 s. The server sends `{"type":"answer"|"decline","ringId","mode"}`.
+A `/call` hello that carries the answered `ringId` is routed to the operator who pressed Answer.
+
+**`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
+sends `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
+The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"release"}`
+or `{"type":"stop","callId"}`.
 Binary frames use the same PCM format.
 
 ## Test
