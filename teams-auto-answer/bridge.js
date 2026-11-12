@@ -9,7 +9,7 @@
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.4.1';
+  const CLIENT = 'teams-call-answerer/0.4.2';
   const MAX_RETRIES = 3;           // reconnect attempts after the connection drops mid-call
   const HELLO_TIMEOUT_MS = 8000;
   const MAX_BUFFERED = 64 * 1024;  // drop outgoing audio instead of queueing behind a slow network
