@@ -99,6 +99,20 @@ resamples them to 16 kHz, and swaps the outgoing microphone track (`RTCRtpSender
 > everyone on the call must be told, or must agree, before a call is recorded or relayed. Your organization's Teams policy
 > may also forbid it. Tell callers, for example with a greeting from the server, and check the rules that apply to you.
 
+## Camera control
+
+Independent of the audio bridge above, and it can start or stop at any point in a call: when the person
+at the Call Bridge app clicks **Take full control (camera)**, this computer's own camera goes into the
+call in place of the Teams computer's. Unlike audio, the camera travels over a direct WebRTC connection
+to the app (its SDP/ICE just signaled through the server), which needs the server's TURN relay
+(`server/turn-server.js`) to cross networks — see [`server/README.md`](../server/README.md#camera-control).
+
+How it works: `page-audio.js` answers that WebRTC offer and, once the app's camera track arrives,
+swaps it into the call's video sender the same way it swaps in the mic-bridge audio — `replaceTrack`,
+forcing the transceiver to `sendrecv` first if Teams had it as `recvonly` or hadn't negotiated video at
+all (same trick, same caveat, as the mic-bridge: it relies on Teams reacting to the resulting
+renegotiation). Stopping the camera, or the call ending, puts back whatever track was there before.
+
 ## Auto-answer rules
 
 The rules are checked in this order:
@@ -135,7 +149,7 @@ This keeps it from pressing other "Accept" buttons, such as meeting invites or f
 | `manifest.json` | Permissions, content-script matches, global shortcuts |
 | `detector.js` | Shared logic: button classification, call detection, rules (no Chrome APIs) |
 | `content.js` | Runs in Teams: watches the page, auto-answers, executes shortcut and side panel actions, relays bridge audio |
-| `page-audio.js` | Runs in the page's own context: taps call audio and swaps the mic track during a bridge |
+| `page-audio.js` | Runs in the page's own context: taps call audio, swaps the mic track during a bridge, and answers the operator app's camera-control WebRTC offer |
 | `bridge.js` | WebSocket client for the server, plus base64 helpers (shared by the worker, the content script and tests) |
 | `background.js` | Shortcuts, badge (AUTO / RING / LIVE), notifications, activity log, keeps tabs awake, bridge connections |
 | `panel.*` | Side panel: settings and manual controls |
@@ -164,6 +178,23 @@ chrome.storage.sync.set({ enabled: true, delaySec: 1 }); __ringFluent('Jane Doe'
 await __sendToContent({ type: 'action', action: 'decline' });                        // what a shortcut does
 ```
 
+To test camera control without a real camera or a second machine, once a call is up (`__tcaPort` from
+the snippet above connects `page-audio.js`), play the operator app's part with a canvas instead of
+`getUserMedia`, using the same unpatched `window.__NativePC` the mock's own caller peer uses:
+
+```js
+const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
+setInterval(() => canvas.getContext('2d').fillRect(0, 0, 64, 64), 100); // any changing pixels
+const opPc = new window.__NativePC();
+opPc.addTransceiver(canvas.captureStream(15).getVideoTracks()[0], { direction: 'sendonly' });
+opPc.onicecandidate = (e) => e.candidate && __tcaPort.postMessage({ type: 'video-ice', callId: 'cam-test', candidate: e.candidate.toJSON() });
+const offer = await opPc.createOffer(); await opPc.setLocalDescription(offer);
+__tcaPort.postMessage({ type: 'video-offer', callId: 'cam-test', sdp: offer.sdp });
+// then feed opPc the resulting video-answer/video-ice messages the same way __tcaPort delivers them
+```
+`teams.getTransceivers()[1].sender.getStats()` should then show `outbound-rtp` with `packetsSent > 0`
+once the mock's own peers are manually renegotiated (real Teams does this on its own; the mock doesn't).
+
 ## Limitations
 
 - The Teams tab must stay open and signed in. Turn off the browser's Memory Saver for Teams if the badge never shows RING.
@@ -172,3 +203,6 @@ await __sendToContent({ type: 'action', action: 'decline' });                   
 - Tested against a mock page, not live Teams. Real Teams button labels may need the regex overrides above.
   The audio bridge relies on Teams web using standard WebRTC in the page. If a Teams update moves calling elsewhere, the side panel shows "No call audio appeared".
 - Your organization may block Teams web or unapproved extensions. Auto-answering means callers may be connected before you're at the keyboard.
+- Camera control adds a video transceiver to a call that started audio-only the same way the mic bridge
+  handles a muted computer: it counts on Teams renegotiating on its own in response. Verified against
+  the mock page (see above), not yet against live Teams.

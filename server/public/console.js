@@ -22,6 +22,8 @@ let muted = false;
 let clock = null;
 let rings = [];
 const notes = new Map(); // ringId -> Notification
+let iceServers = [];
+let camera = null; // { pc, stream } while this computer's camera is in the call
 
 function setStatus(text) { $('status').textContent = text; }
 
@@ -87,6 +89,7 @@ function connect() {
     switch (msg.type) {
       case 'ready':
         retry = 0;
+        iceServers = msg.iceServers || [];
         setStatus('Connected. Waiting for calls.');
         $('login').hidden = true;
         $('main').hidden = false;
@@ -96,6 +99,8 @@ function connect() {
       case 'mute-state': if (active?.callId === msg.callId) setMuted(msg.muted); break;
       case 'released': endCall(`Call ended: ${msg.reason.replace(/\.$/, '')}.`); break;
       case 'error': answering = null; setStatus(msg.message); renderRings(); break;
+      case 'video-answer': camera?.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(() => {}); break;
+      case 'video-ice': if (msg.candidate) camera?.pc.addIceCandidate(msg.candidate).catch(() => {}); break;
     }
   };
   ws.onclose = (e) => {
@@ -283,6 +288,7 @@ function endCall(message) {
     audio.ctx.close();
     audio = null;
   }
+  stopCamera(false);
   const wasActive = !!active;
   active = null;
   setMuted(false); // the next call starts unmuted unless the Teams computer says otherwise
@@ -290,6 +296,53 @@ function endCall(message) {
   $('active').hidden = true;
   if (wasActive) updateRinging(rings);
   if (message) setStatus(message);
+}
+
+// ---- Camera control ----------------------------------------------------------------------------
+// "Take full control" sends this computer's camera into the call in place of the Teams computer's,
+// over a direct WebRTC connection (via the TURN relay the server handed us in iceServers). It can
+// start or stop at any point in the call, independently of the mic bridge above, which keeps running
+// either way.
+
+function setCameraButton() {
+  $('camera').setAttribute('aria-pressed', !!camera);
+  $('camera').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
+}
+
+async function startCamera() {
+  if (!active || camera) return;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
+    const pc = new RTCPeerConnection({ iceServers });
+    camera = { pc, stream, callId: active.callId };
+    pc.onicecandidate = (e) => ws?.send(JSON.stringify({ type: 'video-ice', callId: active.callId, candidate: e.candidate || null }));
+    pc.onconnectionstatechange = () => {
+      if (camera && ['failed', 'closed'].includes(pc.connectionState)) stopCamera();
+    };
+    for (const track of stream.getVideoTracks()) pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: 'video-offer', callId: active.callId, sdp: pc.localDescription.sdp }));
+    $('cameraPreview').srcObject = stream;
+    $('cameraPreview').hidden = false;
+    $('cameraStatus').textContent = 'Sending this camera to the call.';
+    setCameraButton();
+  } catch (err) {
+    setStatus(`Camera unavailable (${err.name}): ${err.message}`);
+  }
+}
+
+function stopCamera(notifyServer = true) {
+  if (!camera) return;
+  const { pc, stream, callId } = camera;
+  stream.getTracks().forEach(t => t.stop());
+  pc.close();
+  camera = null;
+  $('cameraPreview').hidden = true;
+  $('cameraPreview').srcObject = null;
+  $('cameraStatus').textContent = '';
+  setCameraButton();
+  if (notifyServer && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'video-stop', callId }));
 }
 
 function tick() {
@@ -358,6 +411,7 @@ $('mute').addEventListener('click', () => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute', muted: next }));
 });
 $('release').addEventListener('click', () => ws.send(JSON.stringify({ type: 'release' })));
+$('camera').addEventListener('click', () => (camera ? stopCamera() : startCamera()));
 $('handBack').addEventListener('click', () => {
   if (active) ws.send(JSON.stringify({ type: 'stop', callId: active.callId }));
 });

@@ -38,3 +38,5 @@ label.check input { flex: none; }
 .card.ring .row { margin-top: 0; }
 button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; }
 button:disabled { opacity: .55; cursor: default; }
+button[aria-pressed=true]#camera { background: var(--accent); border-color: var(--accent); color: #fff; }
+.preview { margin-top: 10px; width: 100%; max-width: 240px; border-radius: 8px; background: #000; display: block; }

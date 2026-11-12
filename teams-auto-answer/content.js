@@ -163,6 +163,11 @@
         appSetMute(!!msg.muted);
       } else if (msg.type === 'stop') {
         pagePort.postMessage({ type: 'stop', callId, reason: msg.reason });
+      } else if (msg.type === 'ice-servers') {
+        pagePort.postMessage({ type: 'config', options: { iceServers: msg.iceServers } });
+      } else if (msg.type === 'video-offer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
+        // Camera control (see page-audio.js): just relay the signaling, opaque here.
+        pagePort.postMessage({ ...msg, callId });
       }
     });
     // Server unreachable or worker gone: hand the microphone back to Teams.
@@ -196,6 +201,11 @@
         break;
       case 'log':
         send({ type: 'bridge-event', event: 'log', detail: data.message });
+        break;
+      case 'video-answer':
+      case 'video-ice':
+        // The page answered (or trickled ICE for) the operator's camera offer; send it on.
+        if (bridgePort) bridgePort.postMessage(data);
         break;
     }
   };

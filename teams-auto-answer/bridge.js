@@ -4,12 +4,16 @@
 //
 // Wire protocol (see server/README.md), /call — one connection per bridged call:
 //   extension -> server  text  {type:'hello', token, callId, ringId, caller, format, client}   then binary audio frames
-//                              {type:'mute-state', muted}  the Teams computer's mute state
-//   server -> extension  text  {type:'ready'} | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
+//                              {type:'mute-state', muted} | {type:'video-answer'|'video-ice'|'video-stop', ...}
+//   server -> extension  text  {type:'ready', iceServers} | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
+//                              | {type:'video-offer'|'video-ice'|'video-stop', ...}  (camera control, see page-audio.js)
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
+//
+// video-* messages are opaque here: just relayed between the port and the socket as-is, so the
+// WebRTC signaling details live only in page-audio.js (page world) and console.js (operator app).
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.4.2';
+  const CLIENT = 'teams-call-answerer/0.5.0';
   const MAX_RETRIES = 3;           // reconnect attempts after the connection drops mid-call
   const HELLO_TIMEOUT_MS = 8000;
   const MAX_BUFFERED = 64 * 1024;  // drop outgoing audio instead of queueing behind a slow network
@@ -83,12 +87,15 @@
           if (!resumed) since = Date.now();
           status('live', { server: new URL(cfg.serverUrl).host, since, resumed });
           if (muteState !== null) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
+          if (msg.iceServers) toPort({ type: 'ice-servers', iceServers: msg.iceServers });
         } else if (msg.type === 'mute') {
           toPort({ type: 'mute', muted: !!msg.muted });
         } else if (msg.type === 'stop') {
           finish(msg.reason || 'The server ended the bridge.');
         } else if (msg.type === 'error') {
           finish(msg.message || 'The server reported an error.', true);
+        } else if (msg.type === 'video-offer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
+          toPort(msg);
         }
       };
       ws.onclose = (e) => {
@@ -134,6 +141,8 @@
       } else if (msg.type === 'mute-state') {
         muteState = !!msg.muted;
         if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
+      } else if (msg.type === 'video-answer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
+        if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
       } else if (msg.type === 'stop') {
         finish(msg.reason || 'Call ended.');
       }

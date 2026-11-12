@@ -171,6 +171,18 @@ async function main() {
     assert.equal((await app.next(isType('mute-state'))).muted, false);
     console.log('ok  mute is shared between the app and the Teams computer');
 
+    // Camera control: video-offer/-ice/-stop from the operator reach the extension, and
+    // video-answer/-ice back reach the operator. The server only relays; no real SDP needed here.
+    app.send(JSON.stringify({ type: 'video-offer', callId: 'call-0003-abcd', sdp: 'fake-offer' }));
+    assert.equal((await answered.next(isType('video-offer'))).sdp, 'fake-offer');
+    answered.send(JSON.stringify({ type: 'video-answer', sdp: 'fake-answer' }));
+    assert.equal((await app.next(isType('video-answer'))).sdp, 'fake-answer');
+    app.send(JSON.stringify({ type: 'video-ice', callId: 'call-0003-abcd', candidate: { candidate: 'fake' } }));
+    assert.deepEqual((await answered.next(isType('video-ice'))).candidate, { candidate: 'fake' });
+    answered.send(JSON.stringify({ type: 'video-stop' }));
+    await app.next(isType('video-stop'));
+    console.log('ok  camera-control signaling is relayed between the operator and the extension');
+
     station.send({ type: 'ringing', ringId: 'ring-0002-abcd', caller: 'Jane Doe' });
     await app.next(m => m.type === 'calls' && m.rings.length === 1);
     app.send(JSON.stringify({ type: 'answer', ringId: 'ring-0002-abcd' }));
