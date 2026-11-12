@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const DAY_NAMES = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
 const TEXT_FIELDS = ['mode', 'delaySec', 'allowlist', 'blocklist', 'hoursStart', 'hoursEnd',
   'customContext', 'customAcceptAudio', 'customAcceptVideo', 'customAccept', 'customDecline'];
-const CHECK_FIELDS = ['enabled', 'bridgeEnabled', 'bridgeKeepMic', 'hoursEnabled', 'notify', 'keepAlive'];
+const CHECK_FIELDS = ['enabled', 'bridgeKeepMic', 'hoursEnabled', 'notify', 'keepAlive'];
 const BRIDGE_LABELS = {
   idle: 'Idle', waiting: 'Answered, waiting for call audio…', connecting: 'Connecting to server…',
   live: 'Live', reconnecting: 'Reconnecting…', ended: 'Ended', error: 'Error',
@@ -41,6 +41,7 @@ async function saveBridgeFields() {
   const problem = url ? checkServerUrl(url) : null;
   if (!problem) await save({ serverUrl: url });
   await store('local', { bridgeToken: $('bridgeToken').value.trim() });
+  renderStation();
   return problem;
 }
 
@@ -85,17 +86,23 @@ function wireSettings() {
       if (id === 'hoursEnabled') $('hours').hidden = !e.target.checked;
     });
   }
+  // Connecting needs nothing but these two fields: they save as you type and the background
+  // worker (re)connects as soon as both are usable.
   let bridgeTimer = null;
   for (const id of ['serverUrl', 'bridgeToken']) {
     $(id).addEventListener('input', () => {
+      renderStation();
       clearTimeout(bridgeTimer);
       bridgeTimer = setTimeout(saveBridgeFields, 300);
     });
-    $(id).addEventListener('change', async () => {
-      const problem = await saveBridgeFields();
-      setStatus(problem ? `${problem} Not saved.` : '');
-    });
+    $(id).addEventListener('change', saveBridgeFields);
   }
+  $('showToken').addEventListener('click', () => {
+    const show = $('bridgeToken').type === 'password';
+    $('bridgeToken').type = show ? 'text' : 'password';
+    $('showToken').textContent = show ? 'Hide' : 'Show';
+    $('showToken').setAttribute('aria-pressed', show);
+  });
   $('days').addEventListener('change', () => {
     const days = [...$('days').querySelectorAll('input:checked')].map(b => Number(b.value));
     save({ days });
@@ -112,13 +119,6 @@ function wireActions() {
     });
   }
 
-  $('bridgeTest').addEventListener('click', async () => {
-    const problem = await saveBridgeFields();
-    if (problem) { setStatus(problem); return; }
-    setStatus('Testing the server connection…');
-    const res = await chrome.runtime.sendMessage({ type: 'bridge-test' });
-    setStatus(res?.message || 'No answer.');
-  });
   $('bridgeStop').addEventListener('click', async () => {
     await chrome.runtime.sendMessage({ type: 'bridge-stop' });
     setStatus('Bridge stopped. Your microphone is back in the call.');
@@ -193,28 +193,39 @@ function renderBridge() {
 
 chrome.storage.session.get('bridgeStatus').then(({ bridgeStatus: st }) => { bridgeStatus = st; renderBridge(); });
 
-const STATION_LABELS = {
-  off: 'Server link: off (turn on streaming and set the server)',
-  connecting: 'Server link: connecting…',
-  connected: 'Server link: connected — the local app can see and answer calls',
-  disconnected: 'Server link: disconnected',
-};
+const STATION_LABELS = { off: 'Not set up', invalid: 'Check the URL', connecting: 'Connecting…', connected: 'Connected', disconnected: 'Disconnected' };
+let stationStatus = { state: 'off' };
 
-function renderStation(st = { state: 'off' }) {
-  $('stationStatus').dataset.state = st.state;
-  $('stationText').textContent = STATION_LABELS[st.state] + (st.state === 'disconnected' && st.reason ? ` — ${st.reason}` : '');
+/** The connection pill and the line under the fields. What's typed wins over the last reported state. */
+function renderStation() {
+  const url = $('serverUrl').value.trim();
+  const token = $('bridgeToken').value.trim();
+  const problem = url ? checkServerUrl(url) : null;
+  let host = '';
+  try { host = new URL(url).host; } catch { /* not a URL yet */ }
+  let state = stationStatus.state;
+  let detail;
+  if (problem) { state = 'invalid'; detail = problem; }
+  else if (!url || !token) { state = 'off'; detail = 'Enter the server URL and access token. It connects automatically.'; }
+  else if (state === 'connected') detail = `Connected to ${host}. Incoming Teams calls now ring in the Call Bridge app.`;
+  else if (state === 'disconnected') detail = `${stationStatus.reason || 'Connection lost.'} Retrying automatically.`;
+  else { state = 'connecting'; detail = `Connecting to ${host}…`; }
+  $('stationStatus').dataset.state = state;
+  $('stationText').textContent = STATION_LABELS[state];
+  $('connDetail').textContent = detail;
+  $('connDetail').dataset.state = state;
 }
 
-chrome.storage.session.get('stationStatus').then(({ stationStatus }) => renderStation(stationStatus));
+chrome.storage.session.get('stationStatus').then(({ stationStatus: st }) => { if (st) stationStatus = st; renderStation(); });
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.bridgeStatus) { bridgeStatus = changes.bridgeStatus.newValue; renderBridge(); }
-  if (area === 'session' && changes.stationStatus) renderStation(changes.stationStatus.newValue);
+  if (area === 'session' && changes.stationStatus) { stationStatus = changes.stationStatus.newValue || { state: 'off' }; renderStation(); }
   if (area === 'local' && changes.log) renderLog();
   if (area === 'sync' && changes.enabled) $('enabled').checked = changes.enabled.newValue;
 });
 
-loadSettings().then(wireSettings);
+loadSettings().then(() => { wireSettings(); renderStation(); });
 wireActions();
 renderShortcuts();
 renderLog();

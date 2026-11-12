@@ -157,7 +157,7 @@ async function updateRings(fn) {
 }
 
 const station = Bridge.createStation({
-  getConfig: async () => ({ ...(await getBridgeConfig()), enabled: (await getSettings()).bridgeEnabled }),
+  getConfig: async () => ({ ...(await getBridgeConfig()), enabled: true }), // connects once URL and token are set
   onStatus: (s) => chrome.storage.session.set({ stationStatus: { ...s, time: Date.now() } }),
   onOpen: async () => {
     for (const r of Object.values(await getRings())) station.send({ type: 'ringing', ringId: r.ringId, caller: r.caller });
@@ -196,12 +196,25 @@ async function applyProvisionedConfig() {
   await addLog({ event: 'Bridge settings loaded', detail: `from bridge-config.json (${cfg.serverUrl || 'no URL'})` });
 }
 
+// After the extension is installed, updated or reloaded, Teams tabs that were already open keep the
+// old, disconnected scripts and silently stop detecting calls. Reload them so the new scripts load
+// (page-audio.js must run before Teams starts). A tab that is playing sound may be in a call: leave it.
+async function reloadTeamsTabs() {
+  for (const tab of await chrome.tabs.query({ url: TEAMS_URLS })) {
+    if (tab.audible) continue;
+    chrome.tabs.reload(tab.id).catch(() => {});
+    await addLog({ event: 'Teams tab reloaded', detail: 'so it picks up the updated extension' });
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.sync.get(null);
-  await chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored });
+  // bridgeEnabled has no switch any more (0.4): entering the server URL and token is the whole setup.
+  await chrome.storage.sync.set({ ...DEFAULT_SETTINGS, ...stored, bridgeEnabled: true });
   await applyProvisionedConfig();
   await refreshBadge();
   await keepTeamsTabsAlive();
+  await reloadTeamsTabs();
 });
 
 chrome.runtime.onStartup.addListener(() => { refreshBadge(); keepTeamsTabsAlive(); });

@@ -4,11 +4,12 @@
 //
 // Wire protocol (see server/README.md), /call — one connection per bridged call:
 //   extension -> server  text  {type:'hello', token, callId, ringId, caller, format, client}   then binary audio frames
-//   server -> extension  text  {type:'ready'} | {type:'stop', reason} | {type:'error', message}
+//                              {type:'mute-state', muted}  the Teams computer's mute state
+//   server -> extension  text  {type:'ready'} | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.2.0';
+  const CLIENT = 'teams-call-answerer/0.4.1';
   const MAX_RETRIES = 3;           // reconnect attempts after the connection drops mid-call
   const HELLO_TIMEOUT_MS = 8000;
   const MAX_BUFFERED = 64 * 1024;  // drop outgoing audio instead of queueing behind a slow network
@@ -40,8 +41,8 @@
 
   /**
    * Serves one "bridge" port opened by content.js after a call was answered.
-   * Port messages in:  {type:'start', callId, caller} | {type:'audio', data: base64} | {type:'stop', reason}
-   * Port messages out: {type:'connected'} | {type:'audio', data: base64} | {type:'stop', reason}
+   * Port messages in:  {type:'start', callId, caller} | {type:'audio', data: base64} | {type:'mute-state', muted} | {type:'stop', reason}
+   * Port messages out: {type:'connected'} | {type:'audio', data: base64} | {type:'mute', muted} | {type:'stop', reason}
    * getConfig() resolves to { serverUrl, token }. onStatus({state, callId, caller, reason}) reports
    * 'connecting' | 'live' | 'reconnecting' | 'ended' | 'error'. 'live' also carries
    * { server, since, resumed } — resumed is true after a reconnect.
@@ -56,6 +57,7 @@
     let attempts = 0;
     let helloTimer = null;
     let since = 0;        // when the bridge first went live; reconnects keep it
+    let muteState = null; // the Teams computer's mute state, re-sent after (re)connecting
 
     const status = (state, extra = {}) => onStatus?.({ state, callId, caller, ...extra });
     const toPort = (msg) => { try { port.postMessage(msg); } catch { /* content script went away */ } };
@@ -80,6 +82,9 @@
           const resumed = since !== 0;
           if (!resumed) since = Date.now();
           status('live', { server: new URL(cfg.serverUrl).host, since, resumed });
+          if (muteState !== null) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
+        } else if (msg.type === 'mute') {
+          toPort({ type: 'mute', muted: !!msg.muted });
         } else if (msg.type === 'stop') {
           finish(msg.reason || 'The server ended the bridge.');
         } else if (msg.type === 'error') {
@@ -126,6 +131,9 @@
         if (problem) return finish(problem, true);
         status('connecting');
         connect(cfg);
+      } else if (msg.type === 'mute-state') {
+        muteState = !!msg.muted;
+        if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
       } else if (msg.type === 'stop') {
         finish(msg.reason || 'Call ended.');
       }
@@ -177,7 +185,7 @@
     let retry = 0;
     let retryTimer = null;
     let keepalive = null;
-    let wantedUrl = null;
+    let wantedKey = null; // url + token of the current connection
 
     const stationUrl = (callUrl) => callUrl.replace(/\/call\/?$/, '') + '/station';
 
@@ -197,11 +205,12 @@
     async function ensure() {
       const cfg = await getConfig();
       const usable = cfg.enabled && cfg.token && cfg.serverUrl && !checkServerUrl(cfg.serverUrl);
-      if (!usable) { teardown(); wantedUrl = null; onStatus?.({ state: 'off' }); return; }
+      if (!usable) { teardown(); wantedKey = null; onStatus?.({ state: 'off' }); return; }
       const url = stationUrl(cfg.serverUrl);
-      if (ws && wantedUrl === url && ws.readyState <= WebSocket.OPEN) return;
+      const key = `${url} ${cfg.token}`;
+      if (ws && wantedKey === key && ws.readyState <= WebSocket.OPEN) return;
       teardown();
-      wantedUrl = url;
+      wantedKey = key;
       onStatus?.({ state: 'connecting' });
       ws = new WebSocket(url);
       ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'station', token: cfg.token, client: CLIENT }));
