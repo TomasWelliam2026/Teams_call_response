@@ -110,78 +110,34 @@
     }
   }
 
-  // ---- The bridge: audio graph for one call ------------------------------------------------
+  // ---- The bridge: one answered call ------------------------------------------------------
 
   async function createBridge(callId, ignore) {
-    const ctx = new AudioContext();
-    if (ctx.state !== 'running') {
-      await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 1500))]);
-      if (ctx.state !== 'running') {
-        ctx.close();
-        throw new Error('The browser blocked audio processing on this page. Click anywhere in Teams once, then answer again.');
-      }
-    }
-
-    // Outgoing: server audio (+ optionally the real mic) -> one track that replaces Teams' mic.
-    const out = ctx.createMediaStreamDestination();
-    const outTrack = out.stream.getAudioTracks()[0];
-    const injected = new Map(); // sender -> { original, mic }
-
-    // Incoming: every remote audio track -> mono mix -> anti-alias filter -> tap -> 16 kHz PCM.
-    const mix = ctx.createGain();
-    Object.assign(mix, { channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'speakers' });
-    const lowpass1 = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
-    const lowpass2 = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
-    const sink = new GainNode(ctx, { gain: 0 }); // taps only run while connected to the destination
-    mix.connect(lowpass1).connect(lowpass2);
-    sink.connect(ctx.destination);
-    const remotes = new Map(); // track -> { el, src }
+    // Web Audio needs a click in the page first (Chrome's autoplay rule). A call answered from the
+    // local app has none, so then the track engine takes over; it needs no click.
+    const engine = (await webAudioEngine()) || trackEngine();
+    const injected = new Map(); // sender -> original track
+    const remotes = new Set();
     const peers = new Set();
-    const toPcm = downsampler(ctx.sampleRate, (pcm) => post({ type: 'audio', pcm }, [pcm]));
-    const tapKind = await connectTap(ctx, lowpass2, sink, toPcm);
-
-    let nextTime = 0;
     const startedAt = Date.now();
     const watch = setInterval(checkEnded, 1000);
 
     function addRemote(track) {
       if (remotes.has(track)) return;
-      const stream = new MediaStream([track]);
-      // Chrome only feeds remote WebRTC audio into Web Audio while a media element is playing it.
-      const el = new Audio();
-      el.muted = true;
-      el.srcObject = stream;
-      el.play().catch(() => {});
-      const src = ctx.createMediaStreamSource(stream);
-      src.connect(mix);
-      remotes.set(track, { el, src });
-      track.addEventListener('ended', () => dropRemote(track), { once: true });
-    }
-
-    function dropRemote(track) {
-      const r = remotes.get(track);
-      if (!r) return;
-      r.src.disconnect();
-      r.el.srcObject = null;
-      remotes.delete(track);
+      remotes.add(track);
+      engine.addRemote(track);
+      track.addEventListener('ended', () => { remotes.delete(track); engine.dropRemote(track); }, { once: true });
     }
 
     function setOriginal(sender, track) {
-      const entry = injected.get(sender);
-      entry.mic?.disconnect();
-      entry.original = track;
-      entry.mic = null;
-      if (options.keepMic && track?.readyState === 'live') {
-        entry.mic = ctx.createMediaStreamSource(new MediaStream([track]));
-        entry.mic.connect(out);
-      }
+      injected.set(sender, track);
+      engine.setMic(sender, options.keepMic && track?.readyState === 'live' ? track : null);
     }
 
     function inject(sender) {
       if (injected.has(sender)) return;
-      injected.set(sender, { original: sender.track, mic: null });
       setOriginal(sender, sender.track);
-      nativeReplaceTrack.call(sender, outTrack).catch((err) => post({ type: 'log', message: `Could not replace the microphone: ${err.message}` }));
+      nativeReplaceTrack.call(sender, engine.outTrack).catch((err) => post({ type: 'log', message: `Could not replace the microphone: ${err.message}` }));
     }
 
     /** Picks up the call's connections, including ones Teams adds mid-call (e.g. after renegotiation). */
@@ -201,47 +157,205 @@
       sync();
     }
 
-    function play(pcm) {
-      const samples = new Int16Array(pcm);
-      if (!samples.length) return;
-      const buf = ctx.createBuffer(1, samples.length, RATE);
-      const ch = buf.getChannelData(0);
-      for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 0x8000;
-      const now = ctx.currentTime;
-      if (nextTime < now + 0.01) nextTime = now + START_BUFFER_S;
-      if (nextTime > now + MAX_AHEAD_S) return;
-      const src = new AudioBufferSourceNode(ctx, { buffer: buf });
-      src.connect(out);
-      src.start(nextTime);
-      nextTime += buf.duration;
-    }
-
     let stopped = false;
     function stop(reason) {
       if (stopped) return;
       stopped = true;
       clearInterval(watch);
       if (bridge === self) bridge = null;
-      for (const [sender, entry] of injected) {
-        entry.mic?.disconnect();
-        nativeReplaceTrack.call(sender, entry.original).catch(() => {}); // fails harmlessly if the call is gone
+      for (const [sender, original] of injected) {
+        nativeReplaceTrack.call(sender, original).catch(() => {}); // fails harmlessly if the call is gone
       }
-      for (const track of [...remotes.keys()]) dropRemote(track);
-      outTrack.stop();
-      ctx.close();
+      engine.close();
       post({ type: 'stopped', callId, reason, seconds: Math.round((Date.now() - startedAt) / 1000) });
     }
 
     const self = {
       callId,
       sync,
-      play,
+      play: (pcm) => engine.play(pcm),
       stop,
       owns: (sender) => injected.has(sender),
       setOriginal,
-      info: () => ({ peers: peers.size, remoteTracks: remotes.size, senders: injected.size, tap: tapKind, sampleRate: ctx.sampleRate }),
+      info: () => ({ peers: peers.size, remoteTracks: remotes.size, senders: injected.size, ...engine.info }),
     };
     return self;
+  }
+
+  const emitPcm = (pcm) => post({ type: 'audio', pcm }, [pcm]);
+
+  /** Web Audio engine: mixes and resamples in an audio graph. Returns null if Chrome won't run audio here yet. */
+  async function webAudioEngine() {
+    const ctx = new AudioContext();
+    if (ctx.state !== 'running') {
+      await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 300))]);
+      if (ctx.state !== 'running') { ctx.close(); return null; }
+    }
+    // Outgoing: server audio (+ optionally the real mic) -> one track that replaces Teams' mic.
+    const out = ctx.createMediaStreamDestination();
+    const mics = new Map(); // sender -> MediaStreamAudioSourceNode
+    // Incoming: every remote audio track -> mono mix -> anti-alias filter -> tap -> 16 kHz PCM.
+    const mix = ctx.createGain();
+    Object.assign(mix, { channelCount: 1, channelCountMode: 'explicit', channelInterpretation: 'speakers' });
+    const lowpass1 = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
+    const lowpass2 = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
+    const sink = new GainNode(ctx, { gain: 0 }); // taps only run while connected to the destination
+    mix.connect(lowpass1).connect(lowpass2);
+    sink.connect(ctx.destination);
+    const toFrames = framer(emitPcm);
+    const resample = resampler(ctx.sampleRate);
+    const tap = await connectTap(ctx, lowpass2, sink, (x) => toFrames(resample(x)));
+    const remotes = new Map(); // track -> { el, src }
+    let nextTime = 0;
+
+    return {
+      outTrack: out.stream.getAudioTracks()[0],
+      info: { engine: 'webaudio', tap, sampleRate: ctx.sampleRate },
+      addRemote(track) {
+        const stream = new MediaStream([track]);
+        // Chrome only feeds remote WebRTC audio into Web Audio while a media element is playing it.
+        const el = new Audio();
+        el.muted = true;
+        el.srcObject = stream;
+        el.play().catch(() => {});
+        const src = ctx.createMediaStreamSource(stream);
+        src.connect(mix);
+        remotes.set(track, { el, src });
+      },
+      dropRemote(track) {
+        const r = remotes.get(track);
+        if (!r) return;
+        r.src.disconnect();
+        r.el.srcObject = null;
+        remotes.delete(track);
+      },
+      setMic(sender, track) {
+        mics.get(sender)?.disconnect();
+        mics.delete(sender);
+        if (!track) return;
+        const mic = ctx.createMediaStreamSource(new MediaStream([track]));
+        mic.connect(out);
+        mics.set(sender, mic);
+      },
+      play(pcm) {
+        const samples = new Int16Array(pcm);
+        if (!samples.length) return;
+        const buf = ctx.createBuffer(1, samples.length, RATE);
+        const ch = buf.getChannelData(0);
+        for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 0x8000;
+        const now = ctx.currentTime;
+        if (nextTime < now + 0.01) nextTime = now + START_BUFFER_S;
+        if (nextTime > now + MAX_AHEAD_S) return;
+        const src = new AudioBufferSourceNode(ctx, { buffer: buf });
+        src.connect(out);
+        src.start(nextTime);
+        nextTime += buf.duration;
+      },
+      close() {
+        for (const m of mics.values()) m.disconnect();
+        for (const track of [...remotes.keys()]) this.dropRemote(track);
+        out.stream.getAudioTracks()[0].stop();
+        ctx.close();
+      },
+    };
+  }
+
+  /**
+   * Track engine: MediaStreamTrackProcessor reads the caller's audio as AudioData and
+   * MediaStreamTrackGenerator makes the outgoing track from the server's audio. Unlike Web Audio it
+   * runs without a click in the page, so it works on an unattended Teams computer.
+   * "Also send my microphone" isn't mixed in this mode.
+   */
+  function trackEngine() {
+    if (!window.MediaStreamTrackProcessor || !window.MediaStreamTrackGenerator) {
+      throw new Error('The browser blocked audio processing on this page. Click anywhere in Teams once, then answer again.');
+    }
+    const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
+    const writer = generator.writable.getWriter();
+    let timestamp = 0; // µs, must only grow
+    const remotes = new Map(); // track -> { reader, queue: number[] of 16 kHz samples }
+    let primary = null; // the first remote track paces the frames; others are mixed into it
+    const toFrames = framer(emitPcm);
+    if (options.keepMic) post({ type: 'log', message: 'Answered without a click on the Teams computer: "Also send my microphone" is off for this call.' });
+
+    function mixOut() {
+      const lead = remotes.get(primary);
+      if (!lead || lead.queue.length < FRAME) return;
+      const n = lead.queue.length;
+      const mixed = new Float32Array(n);
+      for (const r of remotes.values()) {
+        for (let i = 0; i < n && i < r.queue.length; i++) mixed[i] += r.queue[i];
+        r.queue.splice(0, n);
+      }
+      toFrames(mixed);
+    }
+
+    async function pump(track, entry) {
+      const filters = [];
+      let resample = null;
+      let rate = 0;
+      for (;;) {
+        let chunk;
+        try { chunk = await entry.reader.read(); } catch { break; }
+        if (chunk.done) break;
+        const data = chunk.value;
+        try {
+          if (data.sampleRate !== rate) {
+            rate = data.sampleRate;
+            resample = resampler(rate);
+            filters.length = 0;
+            filters.push(lowpass(rate, 7000), lowpass(rate, 7000));
+          }
+          const n = data.numberOfFrames;
+          const mono = new Float32Array(n);
+          const plane = new Float32Array(n);
+          for (let c = 0; c < data.numberOfChannels; c++) {
+            data.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
+            for (let i = 0; i < n; i++) mono[i] += plane[i] / data.numberOfChannels;
+          }
+          for (const f of filters) f(mono);
+          const out = resample(mono);
+          for (let i = 0; i < out.length; i++) entry.queue.push(out[i]);
+          if (track !== primary && entry.queue.length > FRAME * 4) entry.queue.splice(0, entry.queue.length - FRAME * 4);
+          if (track === primary) mixOut();
+        } finally {
+          data.close();
+        }
+      }
+    }
+
+    return {
+      outTrack: generator,
+      info: { engine: 'tracks', tap: 'track-processor' },
+      addRemote(track) {
+        const entry = { reader: new MediaStreamTrackProcessor({ track }).readable.getReader(), queue: [] };
+        remotes.set(track, entry);
+        primary ||= track;
+        pump(track, entry);
+      },
+      dropRemote(track) {
+        const r = remotes.get(track);
+        if (!r) return;
+        r.reader.cancel().catch(() => {});
+        remotes.delete(track);
+        if (primary === track) primary = remotes.keys().next().value || null;
+      },
+      setMic() {},
+      play(pcm) {
+        const samples = new Int16Array(pcm);
+        if (!samples.length) return;
+        const f32 = new Float32Array(samples.length);
+        for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
+        const data = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfFrames: f32.length, numberOfChannels: 1, timestamp, data: f32 });
+        timestamp += Math.round(f32.length * 1e6 / RATE);
+        writer.write(data).catch(() => {});
+      },
+      close() {
+        for (const track of [...remotes.keys()]) this.dropRemote(track);
+        writer.close().catch(() => {});
+        generator.stop();
+      },
+    };
   }
 
   // AudioWorklet keeps resampling off Teams' busy main thread. Teams' CSP blocks blob: modules, so
@@ -264,25 +378,52 @@
     }
   }
 
-  /** Float32 at `fromRate` -> 20 ms Int16 frames at 16 kHz (linear interpolation; input is already low-passed). */
-  function downsampler(fromRate, emit) {
+  /** Second-order low-pass (RBJ biquad) that filters a Float32Array in place, keeping state between calls. */
+  function lowpass(fs, f0) {
+    const w = 2 * Math.PI * f0 / fs;
+    const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+    const cos = Math.cos(w);
+    const a0 = 1 + alpha;
+    const b0 = (1 - cos) / 2 / a0, b1 = (1 - cos) / a0, b2 = b0, a1 = -2 * cos / a0, a2 = (1 - alpha) / a0;
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    return (x) => {
+      for (let i = 0; i < x.length; i++) {
+        const y = b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x[i]; y2 = y1; y1 = y;
+        x[i] = y;
+      }
+    };
+  }
+
+  /** Float32 at `fromRate` -> Float32 at 16 kHz (linear interpolation; input is already low-passed). */
+  function resampler(fromRate) {
     const step = fromRate / RATE;
-    let pos = 0;        // read position in the current chunk; -1 means `last`
-    let last = 0;       // final sample of the previous chunk
-    let frame = new Int16Array(FRAME);
-    let filled = 0;
+    let pos = 0;   // read position in the current chunk; -1 means `last`
+    let last = 0;  // final sample of the previous chunk
     return (input) => {
+      const out = [];
       while (pos < input.length - 1) {
         const i = Math.floor(pos);
-        const frac = pos - i;
         const a = i < 0 ? last : input[i];
-        const s = Math.max(-1, Math.min(1, a + (input[i + 1] - a) * frac));
-        frame[filled++] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        if (filled === FRAME) { emit(frame.buffer); frame = new Int16Array(FRAME); filled = 0; }
+        out.push(a + (input[i + 1] - a) * (pos - i));
         pos += step;
       }
       pos -= input.length;
       last = input[input.length - 1];
+      return out;
+    };
+  }
+
+  /** Collects 16 kHz float samples into 20 ms Int16 frames. */
+  function framer(emit) {
+    let frame = new Int16Array(FRAME);
+    let filled = 0;
+    return (samples) => {
+      for (let k = 0; k < samples.length; k++) {
+        const s = Math.max(-1, Math.min(1, samples[k]));
+        frame[filled++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+        if (filled === FRAME) { emit(frame.buffer); frame = new Int16Array(FRAME); filled = 0; }
+      }
     };
   }
 

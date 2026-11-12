@@ -1,5 +1,6 @@
 // Runs inside Teams web. Watches for incoming-call UI, applies auto-answer rules and
-// performs actions requested by the background worker (shortcuts / side panel buttons).
+// performs actions requested by the background worker (shortcuts / side panel buttons / the local
+// app answering through the server).
 (() => {
   if (globalThis.__teamsCallAnswerer) return;
   globalThis.__teamsCallAnswerer = true;
@@ -9,7 +10,7 @@
   const POLL_MS = 2000;
 
   let settings = { ...D.DEFAULT_SETTINGS };
-  const tracked = new Map(); // call container element -> { caller, handled, timer }
+  const tracked = new Map(); // call container element -> { ringId, caller, handled, timer }
   let scanTimer = null;
   let observer = null;
   let poller = null;
@@ -57,15 +58,15 @@
       if (live.has(container)) continue;
       clearTimeout(t.timer);
       tracked.delete(container);
-      if (!t.handled) send({ type: 'call-ended' });
+      send({ type: 'call-ended', ringId: t.ringId, handled: t.handled });
     }
 
     for (const call of calls) {
       if (tracked.has(call.container)) continue;
       const decision = D.evaluateRules(call.caller, call.text, settings);
-      const t = { caller: call.caller, handled: false, timer: null };
+      const t = { ringId: crypto.randomUUID(), caller: call.caller, handled: false, timer: null };
       tracked.set(call.container, t);
-      send({ type: 'call-detected', caller: call.caller, decision: decision.reason });
+      send({ type: 'call-detected', ringId: t.ringId, caller: call.caller, decision: decision.reason });
       if (decision.answer) {
         t.timer = setTimeout(() => autoAnswer(call.container), Math.max(0, Number(settings.delaySec) || 0) * 1000);
       }
@@ -84,7 +85,7 @@
   const pagePort = pageChannel.port1;
   let bridgePort = null;
   let bridgeCallId = null;
-  const callers = new Map(); // callId -> caller name, from the arm message
+  const callers = new Map(); // callId -> { caller, ringId }, from the arm message
 
   function pushPageConfig() {
     pagePort.postMessage({ type: 'config', options: { keepMic: !!settings.bridgeKeepMic, workletUrl: chrome.runtime.getURL('tap-worklet.js') } });
@@ -115,7 +116,7 @@
       bridgePort = null;
       bridgeCallId = null;
     });
-    bridgePort.postMessage({ type: 'start', callId, caller: callers.get(callId) });
+    bridgePort.postMessage({ type: 'start', callId, ...callers.get(callId) });
   }
 
   pagePort.onmessage = ({ data }) => {
@@ -143,7 +144,8 @@
   };
   window.postMessage({ __tca: 'connect' }, '*', [pageChannel.port2]);
 
-  // Only a person pressing Teams' own accept button starts the bridge. Answers made by the extension
+  // The bridge starts when a person answers: by pressing Teams' own accept button here, or by
+  // clicking Answer in the local app (see 'remote-answer'). Answers made by the extension on its own
   // (side panel, shortcuts, auto-answer) use btn.click(), whose events are untrusted, so they don't.
   // Capture phase, because Teams removes the toast as soon as it handles the press. If Teams reacts
   // on pointerdown/pointerup and removes the button first, Chrome sends no click at all, so a press
@@ -156,12 +158,12 @@
     if (!btn) return null;
     const call = D.detectCalls(document, settings)
       .find(c => [c.actions.audio, c.actions.video, c.actions.accept].includes(btn));
-    return call ? { btn, caller: call.caller } : null;
+    return call ? { btn, caller: call.caller, ringId: tracked.get(call.container)?.ringId } : null;
   }
 
-  function personAnswered(caller) {
+  function personAnswered({ caller, ringId }) {
     pressed = null;
-    send({ type: 'bridge-arm', caller });
+    send({ type: 'bridge-arm', caller, ringId });
   }
 
   document.addEventListener('pointerdown', (e) => {
@@ -172,13 +174,13 @@
   document.addEventListener('pointerup', (e) => {
     if (!e.isTrusted || !pressed) return;
     const press = pressed;
-    setTimeout(() => { if (pressed === press && !press.btn.isConnected) personAnswered(press.caller); }, PRESS_GONE_MS);
+    setTimeout(() => { if (pressed === press && !press.btn.isConnected) personAnswered(press); }, PRESS_GONE_MS);
   }, true);
 
   document.addEventListener('click', (e) => {
     if (!e.isTrusted || !settings.bridgeEnabled) return;
     const hit = acceptButtonCall(e.target);
-    if (hit) personAnswered(hit.caller);
+    if (hit) personAnswered(hit);
     else pressed = null;
   }, true);
 
@@ -186,12 +188,21 @@
     if (msg.type === 'bridge-arm') {
       // Sent to every frame: whichever frame holds the call's audio connection starts the bridge.
       callers.clear(); // only the latest answered call matters
-      callers.set(msg.callId, msg.caller);
+      callers.set(msg.callId, { caller: msg.caller, ringId: msg.ringId });
       pagePort.postMessage({ type: 'arm', callId: msg.callId });
       return;
     }
     if (msg.type === 'bridge-stop') {
       pagePort.postMessage({ type: 'stop', reason: msg.reason });
+      return;
+    }
+    if (msg.type === 'remote-answer') {
+      // The person at the local app pressed Answer/Decline for this ring. Only the frame showing it replies.
+      const entry = [...tracked].find(([, t]) => t.ringId === msg.ringId);
+      const call = entry && D.detectCalls(document, settings).find(c => c.container === entry[0]);
+      if (!call) return;
+      if (msg.action !== 'decline') send({ type: 'bridge-arm', caller: call.caller, ringId: msg.ringId }); // arm before Teams connects
+      sendResponse(perform(call, msg.action === 'decline' ? 'decline' : (msg.action || 'audio')) || { ok: false, message: 'Teams has no button for that.' });
       return;
     }
     if (msg.type === 'action') {

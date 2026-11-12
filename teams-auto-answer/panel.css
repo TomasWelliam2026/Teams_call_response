@@ -47,6 +47,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { color: var(--danger); }
 button.link { border: 0; background: none; padding: 0; color: var(--accent); text-decoration: underline; }
 .status { min-height: 1.4em; margin: 6px 0 0; color: var(--muted); }
+.status.error { color: var(--danger); font-weight: 600; }
 
 label { display: block; margin: 8px 0 3px; }
 label.check { display: flex; gap: 6px; align-items: center; }
@@ -68,7 +69,9 @@ textarea { resize: vertical; }
 .bridge-status[data-state=waiting] .dot, .bridge-status[data-state=connecting] .dot,
 .bridge-status[data-state=reconnecting] .dot { background: #f9ab00; }
 .bridge-status[data-state=live] { color: var(--fg); font-weight: 600; }
-.bridge-status[data-state=live] .dot { background: var(--accent); }
+.bridge-status[data-state=live] .dot, .bridge-status[data-state=connected] .dot { background: var(--accent); }
+.bridge-status[data-state=disconnected] { color: var(--danger); }
+.bridge-status[data-state=disconnected] .dot { background: var(--danger); }
 .bridge-status[data-state=error] { color: var(--danger); }
 .bridge-status[data-state=error] .dot { background: var(--danger); }
 

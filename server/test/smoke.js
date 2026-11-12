@@ -47,7 +47,7 @@ async function main() {
     const health = await (await fetch(`http://127.0.0.1:${PORT}/healthz`)).json();
     assert.equal(health.ok, true);
     const page = await fetch(`http://127.0.0.1:${PORT}/`);
-    assert.match(await page.text(), /Call Bridge Console/);
+    assert.match(await page.text(), /<title>Call Bridge<\/title>/);
     console.log('ok  health check and console page');
 
     const bad = await open('/call');
@@ -120,6 +120,59 @@ async function main() {
     toBridge({ type: 'stop', reason: 'test done' });
     assert.equal(statuses.at(-1), 'ended');
     console.log('ok  extension bridge.js: test, connect, audio round trip, stop');
+
+    // Remote answer: the extension's station link (real createStation) reports a ring, the local
+    // app answers, and the call that connects with that ringId goes straight to that operator.
+    const badStation = await open('/station');
+    badStation.send(JSON.stringify({ type: 'hello', role: 'station', token: 'wrong' }));
+    assert.equal(await badStation.closed, 4001);
+
+    const commands = [];
+    const stationStates = [];
+    const station = Bridge.createStation({
+      getConfig: async () => ({ serverUrl: `${BASE}/call`, token: TOKEN, enabled: true }),
+      onCommand: (cmd) => commands.push(cmd),
+      onStatus: (s) => stationStates.push(s.state),
+    });
+    await station.ensure();
+    for (let i = 0; i < 50 && !station.connected; i++) await wait(20);
+    assert.ok(station.connected, 'station connects');
+
+    const app = await open('/operator');
+    app.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+    await app.next(isType('ready'));
+    assert.equal((await app.next(m => m.type === 'calls' && m.stations === 1)).stations, 1);
+
+    station.send({ type: 'ringing', ringId: 'ring-0001-abcd', caller: 'Eric Lee' });
+    const ringing = await app.next(m => m.type === 'calls' && m.rings.length === 1);
+    assert.equal(ringing.rings[0].caller, 'Eric Lee');
+    app.send(JSON.stringify({ type: 'answer', ringId: 'ring-0001-abcd' }));
+    for (let i = 0; i < 50 && !commands.length; i++) await wait(20);
+    assert.deepEqual(commands[0], { type: 'answer', ringId: 'ring-0001-abcd', mode: 'audio' });
+    station.send({ type: 'answer-result', ringId: 'ring-0001-abcd', ok: true });
+    station.send({ type: 'ring-ended', ringId: 'ring-0001-abcd' });
+    await app.next(m => m.type === 'calls' && m.rings.length === 0);
+
+    const answered = await open('/call');
+    answered.send(JSON.stringify({ type: 'hello', token: TOKEN, callId: 'call-0003-abcd', ringId: 'ring-0001-abcd', caller: 'Eric Lee' }));
+    assert.equal((await app.next(isType('taken'))).callId, 'call-0003-abcd');
+    answered.send(frame(5));
+    assert.deepEqual((await app.next(isBinary)).binary, frame(5));
+    app.send(frame(6));
+    assert.deepEqual((await answered.next(isBinary)).binary, frame(6));
+    console.log('ok  remote answer: ring shown, Answer reaches the extension, call routed to that operator');
+
+    station.send({ type: 'ringing', ringId: 'ring-0002-abcd', caller: 'Jane Doe' });
+    await app.next(m => m.type === 'calls' && m.rings.length === 1);
+    app.send(JSON.stringify({ type: 'answer', ringId: 'ring-0002-abcd' }));
+    for (let i = 0; i < 50 && commands.length < 2; i++) await wait(20);
+    station.send({ type: 'answer-result', ringId: 'ring-0002-abcd', ok: false, message: 'Teams has no button for that.' });
+    assert.match((await app.next(isType('error'))).message, /Could not answer: Teams has no button/);
+    station.close();
+    await app.next(m => m.type === 'calls' && m.stations === 0 && m.rings.length === 0);
+    console.log('ok  failed answer is reported; unlinking clears its rings');
+    answered.close();
+    app.close();
   } finally {
     server.kill();
   }

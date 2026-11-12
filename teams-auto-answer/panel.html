@@ -30,6 +30,9 @@
     <label for="bridgeToken">Access token</label>
     <input type="password" id="bridgeToken" autocomplete="off" spellcheck="false">
     <label class="check"><input type="checkbox" id="bridgeKeepMic"> Also send my microphone</label>
+    <div class="bridge-status" id="stationStatus" data-state="off">
+      <span class="dot"></span><span id="stationText">Server link: off</span>
+    </div>
     <div class="bridge-status" id="bridgeStatus" data-state="idle">
       <span class="dot"></span><span id="bridgeText">Idle</span>
     </div>
