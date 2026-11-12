@@ -318,8 +318,14 @@ function onStationSocket(ws) {
 
 // ---- HTTP + WebSocket upgrade ------------------------------------------------------------
 
+/** Path of a request, or null for junk that URL() can't parse (scanners send things like "//"). */
+function pathOf(rawUrl) {
+  try { return new URL(rawUrl, 'http://localhost').pathname; } catch { return null; }
+}
+
 const server = http.createServer((req, res) => {
-  const { pathname } = new URL(req.url, 'http://localhost');
+  const pathname = pathOf(req.url);
+  if (pathname === null) { res.writeHead(400).end('bad request'); return; }
   if (pathname === '/healthz') {
     const health = { ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size, teamsComputers: stations.size, apps: operators.size };
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(health));
@@ -353,7 +359,7 @@ function reject(ws) {
 }
 
 server.on('upgrade', (req, socket, head) => {
-  const { pathname } = new URL(req.url, 'http://localhost');
+  const pathname = pathOf(req.url);
   const route = ROUTES[pathname];
   if (!route) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => {
@@ -389,6 +395,10 @@ function shutdown() {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 3000).unref();
 }
+// Last resort: one bad request or a bug in one handler must not take every call and app offline.
+// Log it and keep serving; the error still shows up in logs\server.log (and monitor.bat).
+process.on('uncaughtException', (err) => log('unexpected error (server kept running):', err.stack || err));
+process.on('unhandledRejection', (err) => log('unexpected rejection (server kept running):', err?.stack || err));
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
