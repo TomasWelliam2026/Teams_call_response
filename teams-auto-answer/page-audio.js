@@ -13,8 +13,8 @@
   const ARM_TIMEOUT_MS = 30000;  // after "answer", wait this long for call audio to appear
   const PREFER_NEW_MS = 3000;     // after "answer", prefer a connection that wasn't already up this long
   const RECENT_MS = 2000;         // a connection that came up this shortly before "answer" counts as new
-  const START_BUFFER_S = 0.08;   // playback jitter buffer for server audio
-  const MAX_AHEAD_S = 0.6;       // drop server audio that would queue beyond this (keeps latency bounded)
+  const START_BUFFER_S = 0.25;   // playback jitter buffer for server audio (over two WAN hops, 80 ms was too thin and caused cutouts)
+  const MAX_AHEAD_S = 1.2;       // drop server audio that would queue beyond this (keeps latency bounded)
 
   const NativePC = window.RTCPeerConnection;
   const nativeReplaceTrack = RTCRtpSender.prototype.replaceTrack;
