@@ -174,14 +174,14 @@
     // the mic-bridge audio above. Independent of audio: can start or stop at any point in the call.
     let vpc = null;              // RTCPeerConnection to the operator app, receiving its camera only
     let operatorVideoTrack = null;
-    const videoSenders = new Set(); // senders currently carrying operatorVideoTrack, so stopVideo() reverts only those
+    const videoTransceivers = new Map(); // sender -> { transceiver, originalDirection }, so stopVideo() reverts only these
 
     function applyVideo() {
       if (!operatorVideoTrack) return;
       for (const pc of peers) {
         const t = videoTransceiver(pc) || pc.addTransceiver('video', { direction: 'sendrecv' });
+        if (!videoTransceivers.has(t.sender)) videoTransceivers.set(t.sender, { transceiver: t, originalDirection: t.direction });
         inject(t, operatorVideoTrack);
-        videoSenders.add(t.sender);
       }
     }
 
@@ -211,8 +211,13 @@
       vpc?.close();
       vpc = null;
       operatorVideoTrack = null;
-      for (const sender of videoSenders) nativeReplaceTrack.call(sender, injected.get(sender) ?? null).catch(() => {});
-      videoSenders.clear();
+      // A null track alone leaves the far end showing a frozen last frame (no "track ended" signal
+      // reaches it): also put the transceiver's direction back so the m-line actually goes inactive.
+      for (const [sender, { transceiver, originalDirection }] of videoTransceivers) {
+        nativeReplaceTrack.call(sender, injected.get(sender) ?? null).catch(() => {});
+        if (transceiver.direction !== originalDirection) transceiver.direction = originalDirection;
+      }
+      videoTransceivers.clear();
       if (reason) post({ type: 'log', message: reason });
     }
 
