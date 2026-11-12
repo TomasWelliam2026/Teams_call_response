@@ -130,7 +130,7 @@ function onCallSocket(ws) {
 
     if (msg.type === 'hello' && !call) {
       clearTimeout(helloTimer);
-      if (!tokenMatches(msg.token, CALL_TOKEN)) return ws.close(CLOSE.unauthorized, 'unauthorized');
+      if (!tokenMatches(msg.token, CALL_TOKEN)) return reject(ws);
       if (msg.format && (msg.format.sampleRate !== FORMAT.sampleRate || msg.format.encoding !== FORMAT.encoding)) {
         sendJson(ws, { type: 'error', message: `Unsupported audio format; this server expects ${JSON.stringify(FORMAT)}.` });
         return ws.close(CLOSE.badHello, 'format');
@@ -200,7 +200,7 @@ function onOperatorSocket(ws) {
 
     if (!authed) {
       clearTimeout(helloTimer);
-      if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return ws.close(CLOSE.unauthorized, 'unauthorized');
+      if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
       authed = true;
       operators.add(ws);
       sendJson(ws, { type: 'ready', format: FORMAT, fallback: FALLBACK });
@@ -261,11 +261,11 @@ function onStationSocket(ws) {
 
     if (!authed) {
       clearTimeout(helloTimer);
-      if (msg.type !== 'hello' || !tokenMatches(msg.token, CALL_TOKEN)) return ws.close(CLOSE.unauthorized, 'unauthorized');
+      if (msg.type !== 'hello' || !tokenMatches(msg.token, CALL_TOKEN)) return reject(ws);
       authed = true;
       stations.add(ws);
       sendJson(ws, { type: 'ready' });
-      log(`station linked (${msg.client || 'unknown client'}); ${stations.size} linked`);
+      log(`Teams computer linked from ${ws.remote} (${msg.client || 'unknown client'}); ${stations.size} linked`);
       broadcastCalls();
       return;
     }
@@ -302,7 +302,7 @@ function onStationSocket(ws) {
     clearTimeout(helloTimer);
     if (!stations.delete(ws)) return;
     for (const [id, r] of rings) if (r.station === ws) rings.delete(id);
-    log(`station unlinked; ${stations.size} linked`);
+    log(`Teams computer unlinked (${ws.remote}); ${stations.size} linked`);
     broadcastCalls();
   });
 }
@@ -333,10 +333,22 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket };
 
+const WHO = { '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer' };
+
+/** Closes a sign-in with a wrong token, and logs it so a misconfigured computer shows up in the log. */
+function reject(ws) {
+  log(`rejected ${ws.who} sign-in from ${ws.remote}: wrong token`);
+  ws.close(CLOSE.unauthorized, 'unauthorized');
+}
+
 server.on('upgrade', (req, socket, head) => {
-  const route = ROUTES[new URL(req.url, 'http://localhost').pathname];
+  const { pathname } = new URL(req.url, 'http://localhost');
+  const route = ROUTES[pathname];
   if (!route) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, (ws) => {
+    ws.who = WHO[pathname];
+    // Behind Caddy the peer is 127.0.0.1; the real address is in X-Forwarded-For.
+    ws.remote = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress).split(',')[0].trim();
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('error', (err) => log('socket error:', err.message));
