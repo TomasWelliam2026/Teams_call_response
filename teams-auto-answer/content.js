@@ -182,8 +182,11 @@
   }
 
   // ---- Ending the call for real, not just handing the bridge back --------------------------
+  // A 1:1 call's Leave button is data-tid="hangup-button"; a meeting's is "hangup-main-btn" -
+  // same control, different surface, confirmed against live Teams for each (meetings also drop the
+  // data-tid from the mic/camera buttons entirely, down to aria-label only - see callUiActive()).
   function hangupButton() {
-    return document.querySelector('[data-tid="hangup-button"]')
+    return document.querySelector('[data-tid="hangup-button"], [data-tid="hangup-main-btn"]')
       || [...document.querySelectorAll('button, [role="button"]')]
         .find(b => /^\s*(leave|hang up|end call)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
   }
@@ -192,11 +195,14 @@
   // A call rings and gets answered (a toast with an Accept button we can watch for); a meeting has
   // none of that - you join it yourself, from a calendar invite, a chat link, "Meet now", anywhere.
   // There's no single action to hook, so instead this watches for the thing every live call or
-  // meeting shows once its media is up: Teams' own Leave/Mic toolbar, strictly by data-tid (unlike
+  // meeting shows once its media is up: Teams' own Leave control, strictly by data-tid (unlike
   // hangupButton()'s label fallback above, used only when we already know a call should be
-  // ending - here a label match elsewhere on the page, e.g. "Leave team", would mean false arms).
+  // ending - here a label match elsewhere on the page, e.g. "Leave team", would mean false arms),
+  // paired with a second, also tid-based signal that it's really a call/meeting toolbar and not
+  // some other "Leave"-labelled control, to keep the same safety margin on both surfaces.
   function callUiActive() {
-    return !!(document.querySelector('[data-tid="hangup-button"]') && document.querySelector('[data-tid="microphone-button"]'));
+    if (!document.querySelector('[data-tid="hangup-button"], [data-tid="hangup-main-btn"]')) return false;
+    return !!document.querySelector('[data-tid="microphone-button"], [data-tid="camera-button"], [data-tid="myself-video-more-menu"]');
   }
 
   /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined. */
