@@ -1,6 +1,6 @@
 <#
-  Starts the call bridge server installed by install.ps1 (the "CallBridge Server" and
-  "CallBridge HTTPS" startup tasks) and checks that it answers. Normally not needed: the tasks
+  Starts the call bridge server installed by install.ps1 (the "CallBridge Server", "CallBridge HTTPS"
+  and "CallBridge TURN" startup tasks) and checks that it answers. Normally not needed: the tasks
   start at boot and restart themselves. Asks for administrator rights if it doesn't have them.
 #>
 $ErrorActionPreference = 'Stop'
@@ -10,7 +10,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
   return
 }
 
-$tasks = 'CallBridge Server', 'CallBridge HTTPS'
+$tasks = 'CallBridge Server', 'CallBridge HTTPS', 'CallBridge TURN'
 foreach ($name in $tasks) {
   $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
   if (-not $task) { throw "Task '$name' is not installed. Run server\deploy\windows\install.ps1 first." }

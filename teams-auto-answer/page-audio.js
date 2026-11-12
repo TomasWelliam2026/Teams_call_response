@@ -4,6 +4,9 @@
 //   - mixes the call's remote audio, resamples it to 16 kHz PCM and hands it to content.js
 //   - swaps the microphone track Teams sends for a track that plays the server's audio
 // When the call or the bridge ends, Teams' own microphone track is put back.
+// Camera control (independent of the above, can start/stop at any point in the call): on
+// 'video-offer' it answers a WebRTC connection to the operator app and, once that connection's
+// camera track arrives, swaps it in as the call's outgoing video the same way — see startVideo().
 (() => {
   if (window.__tcaPageAudio || !window.RTCPeerConnection) return;
   window.__tcaPageAudio = true;
@@ -13,8 +16,8 @@
   const ARM_TIMEOUT_MS = 30000;  // after "answer", wait this long for call audio to appear
   const PREFER_NEW_MS = 3000;     // after "answer", prefer a connection that wasn't already up this long
   const RECENT_MS = 2000;         // a connection that came up this shortly before "answer" counts as new
-  const START_BUFFER_S = 0.08;   // playback jitter buffer for server audio
-  const MAX_AHEAD_S = 0.6;       // drop server audio that would queue beyond this (keeps latency bounded)
+  const START_BUFFER_S = 0.25;   // playback jitter buffer for server audio (over two WAN hops, 80 ms was too thin and caused cutouts)
+  const MAX_AHEAD_S = 1.2;       // drop server audio that would queue beyond this (keeps latency bounded)
 
   const NativePC = window.RTCPeerConnection;
   const nativeReplaceTrack = RTCRtpSender.prototype.replaceTrack;
@@ -66,9 +69,15 @@
   const isOpen = (pc) => pc.signalingState !== 'closed' && !['closed', 'failed'].includes(pc.connectionState);
   const isConnected = (pc) => pc.connectionState === 'connected' || ['connected', 'completed'].includes(pc.iceConnectionState);
   const remoteAudio = (pc) => pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio' && t.readyState === 'live');
+  // Includes a transceiver negotiated "recvonly" (Teams does this when the computer's microphone
+  // is muted or missing, which is also why Teams' own Mute button is disabled then). inject() below
+  // flips it to sendrecv so the bridge's track actually goes out instead of being silently dropped.
   const audioSenders = (pc) => pc.getTransceivers()
-    .filter(t => t.receiver.track?.kind === 'audio' && ['sendrecv', 'sendonly'].includes(t.currentDirection || t.direction))
-    .map(t => t.sender);
+    .filter(t => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio')
+    .map(t => t);
+  /** The call's video transceiver, if Teams already negotiated one (e.g. video was on, or it's a meeting). */
+  const videoTransceiver = (pc) => pc.getTransceivers()
+    .find(t => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video');
 
   function callPeers() {
     for (const pc of pcs) if (!isOpen(pc)) pcs.delete(pc);
@@ -144,10 +153,67 @@
       engine.setMic(sender, options.keepMic && track?.readyState === 'live' ? track : null);
     }
 
-    function inject(sender) {
-      if (injected.has(sender)) return;
-      setOriginal(sender, sender.track);
-      nativeReplaceTrack.call(sender, engine.outTrack).catch((err) => post({ type: 'log', message: `Could not replace the microphone: ${err.message}` }));
+    /** Swaps `transceiver`'s outgoing track for `outTrack` (defaults to the audio engine's). Kind-agnostic:
+     * also used for the operator's camera (see startVideo below), which just passes a video track. */
+    function inject(transceiver, outTrack = engine.outTrack) {
+      const sender = transceiver.sender;
+      const firstTime = !injected.has(sender);
+      if (firstTime) {
+        // Only audio senders feed the mic-mixing engine; a video sender has nothing to mix.
+        if (outTrack.kind === 'audio') setOriginal(sender, sender.track);
+        else injected.set(sender, sender.track);
+      }
+      // "recvonly" (no mic/camera on this computer, or video never negotiated) would have the sender
+      // drop every packet; sendrecv lets the bridge's track actually reach the call.
+      if (transceiver.direction !== 'sendrecv' && transceiver.direction !== 'sendonly') transceiver.direction = 'sendrecv';
+      nativeReplaceTrack.call(sender, outTrack).catch((err) => post({ type: 'log', message: `Could not replace the ${outTrack.kind}: ${err.message}` }));
+    }
+
+    // ---- Camera control: the operator's camera, received over a separate WebRTC connection to the
+    // operator app (signaled through content.js/the server), injected into the call the same way as
+    // the mic-bridge audio above. Independent of audio: can start or stop at any point in the call.
+    let vpc = null;              // RTCPeerConnection to the operator app, receiving its camera only
+    let operatorVideoTrack = null;
+    const videoSenders = new Set(); // senders currently carrying operatorVideoTrack, so stopVideo() reverts only those
+
+    function applyVideo() {
+      if (!operatorVideoTrack) return;
+      for (const pc of peers) {
+        const t = videoTransceiver(pc) || pc.addTransceiver('video', { direction: 'sendrecv' });
+        inject(t, operatorVideoTrack);
+        videoSenders.add(t.sender);
+      }
+    }
+
+    async function startVideo(sdp) {
+      if (vpc) stopVideo('Replaced by a new camera offer.');
+      vpc = new NativePC({ iceServers: options.iceServers || [] });
+      vpc.ontrack = (e) => { if (e.track.kind === 'video') { operatorVideoTrack = e.track; applyVideo(); } };
+      // RTCIceCandidate itself doesn't survive postMessage to content.js (isolated world); its plain
+      // JSON shape does, and addIceCandidate() accepts that shape just as well.
+      vpc.onicecandidate = (e) => post({ type: 'video-ice', candidate: e.candidate ? e.candidate.toJSON() : null });
+      try {
+        await vpc.setRemoteDescription({ type: 'offer', sdp });
+        const answer = await vpc.createAnswer();
+        await vpc.setLocalDescription(answer);
+        post({ type: 'video-answer', sdp: vpc.localDescription.sdp });
+      } catch (err) {
+        post({ type: 'log', message: `Could not start the camera: ${err.message}` });
+        stopVideo('Camera offer failed.');
+      }
+    }
+
+    function videoIce(candidate) {
+      if (candidate) vpc?.addIceCandidate(candidate).catch(() => {});
+    }
+
+    function stopVideo(reason) {
+      vpc?.close();
+      vpc = null;
+      operatorVideoTrack = null;
+      for (const sender of videoSenders) nativeReplaceTrack.call(sender, injected.get(sender) ?? null).catch(() => {});
+      videoSenders.clear();
+      if (reason) post({ type: 'log', message: reason });
     }
 
     /** Picks up the call's connections, including ones Teams adds mid-call (e.g. after renegotiation). */
@@ -156,8 +222,9 @@
         if (ignore.has(pc)) continue;
         peers.add(pc);
         remoteAudio(pc).forEach(addRemote);
-        audioSenders(pc).forEach(inject);
+        audioSenders(pc).forEach(t => inject(t));
       }
+      applyVideo(); // a newly-synced peer (or a late Teams video transceiver) also gets the camera
     }
 
     function checkEnded() {
@@ -173,6 +240,7 @@
       stopped = true;
       clearInterval(watch);
       if (bridge === self) bridge = null;
+      stopVideo();
       for (const [sender, original] of injected) {
         nativeReplaceTrack.call(sender, original).catch(() => {}); // fails harmlessly if the call is gone
       }
@@ -186,10 +254,13 @@
       play: (pcm) => engine.play(pcm),
       setMuted: (muted) => engine.setMuted(muted),
       stop,
+      startVideo,
+      videoIce,
+      stopVideo: () => stopVideo('Stopped from the app.'),
       owns: (sender) => injected.has(sender),
       originalOf: (sender) => injected.get(sender) ?? null,
       setOriginal,
-      info: () => ({ peers: peers.size, remoteTracks: remotes.size, senders: injected.size, ...engine.info }),
+      info: () => ({ peers: peers.size, remoteTracks: remotes.size, senders: injected.size, video: !!operatorVideoTrack, ...engine.info }),
     };
     return self;
   }
@@ -455,6 +526,9 @@
       case 'audio': if (bridge?.callId === data.callId) bridge.play(data.pcm); break;
       case 'mute': if (bridge?.callId === data.callId) bridge.setMuted(!!data.muted); break;
       case 'stop': disarm(); if (!data.callId || bridge?.callId === data.callId) bridge?.stop(data.reason || 'Stopped.'); break;
+      case 'video-offer': if (bridge?.callId === data.callId) bridge.startVideo(data.sdp); break;
+      case 'video-ice': if (bridge?.callId === data.callId) bridge.videoIce(data.candidate); break;
+      case 'video-stop': if (bridge?.callId === data.callId) bridge.stopVideo(); break;
     }
   }
 

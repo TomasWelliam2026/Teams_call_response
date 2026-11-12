@@ -15,7 +15,7 @@ Write-Host ' Call Bridge server' -ForegroundColor Cyan
 Write-Host ' It runs in the background (as SYSTEM), so it keeps running when you close this window,'
 Write-Host ' disconnect Remote Desktop, or log off. This window only shows what it is doing.'
 Write-Host ''
-foreach ($name in 'CallBridge Server', 'CallBridge HTTPS') {
+foreach ($name in 'CallBridge Server', 'CallBridge HTTPS', 'CallBridge TURN') {
   $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
   $state = if ($task) { "$($task.State)" } else { 'NOT INSTALLED (run deploy\windows\install.ps1)' }
   $color = if ($state -eq 'Running') { 'Green' } else { 'Red' }

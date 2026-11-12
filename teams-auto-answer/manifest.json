@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Answer Microsoft Teams (web) calls with shortcuts or auto-answer, and bridge answered calls' audio to your server.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "notifications", "tabs", "sidePanel", "alarms"],

@@ -24,6 +24,15 @@ What the server does with a call:
 
 Audio is relayed in memory only. Nothing is written to disk.
 
+## Camera control
+
+While on a call, the app's **Take full control (camera)** button sends this computer's own camera
+into the call in place of the Teams computer's — on top of the mic bridge above, which keeps running
+either way. Unlike audio (relayed as raw bytes through this server), video travels over a direct
+WebRTC connection between the app and the extension, only *signaled* through this server; the actual
+media needs a TURN relay to cross networks, which is what `turn-server.js` is for (see below). Stopping
+the camera, or the call ending, hands the video sender back to whatever Teams had there.
+
 ## Run
 
 ```bash
@@ -38,8 +47,20 @@ BRIDGE_TOKEN=<random secret, 16+ chars> npm start
 | `PORT` | `8080` | HTTP/WebSocket port |
 | `HOST` | `0.0.0.0` | Interface to listen on. Use `127.0.0.1` when a local HTTPS proxy is the only way in. |
 | `FALLBACK` | `silence` | `silence` or `echo` for calls no operator has taken |
+| `TURN_PORT` | `3478` | UDP port for the camera-control TURN relay (`turn-server.js`); must match on both |
+| `TURN_MIN_PORT` / `TURN_MAX_PORT` | `49152` / `49452` | UDP port range TURN uses to relay media |
 
 Generate a token with `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`.
+
+Camera control also needs `turn-server.js` running (same `BRIDGE_TOKEN`, doubling as the TURN password):
+
+```bash
+BRIDGE_TOKEN=<same secret> node turn-server.js
+```
+
+It's a separate process from `server.js` by design — a crash or restart on either side doesn't affect
+the other. `install.ps1` below sets it up as its own startup task automatically; running it elsewhere,
+start it the same way you start `server.js` and open UDP 3478 and 49152-49452 on it.
 
 ## Deploy on a Windows VPS (always on, HTTPS, no domain needed)
 
@@ -50,12 +71,14 @@ Generate a token with `node -e "console.log(require('crypto').randomBytes(24).to
    powershell -ExecutionPolicy Bypass -File server\deploy\windows\install.ps1
    ```
 
-   The script creates `server\.env` with two new secrets, opens TCP 80 and 443 in Windows Firewall,
-   and registers two startup tasks running as SYSTEM: **CallBridge Server** (Node, only on 127.0.0.1)
-   and **CallBridge HTTPS** (Caddy with a free Let's Encrypt certificate). It then checks the site.
-   Both tasks restart if they stop and come back after a reboot.
+   The script creates `server\.env` with two new secrets, opens TCP 80 and 443 plus UDP 3478 and
+   49152-49452 in Windows Firewall, and registers three startup tasks running as SYSTEM:
+   **CallBridge Server** (Node, only on 127.0.0.1), **CallBridge HTTPS** (Caddy with a free Let's
+   Encrypt certificate) and **CallBridge TURN** (`turn-server.js`, the camera-control relay). It then
+   checks the site. All three tasks restart if they stop and come back after a reboot.
    The address is `https://<your-ip-with-dashes>.sslip.io` unless you pass `-Domain your.domain`.
-3. If your provider also has a network firewall (for example Hetzner Cloud Firewall), allow inbound TCP 80 and 443 there.
+3. If your provider also has a network firewall (for example Hetzner Cloud Firewall), allow inbound
+   TCP 80 and 443, and UDP 3478 and 49152-49452 (camera control), there too.
 4. Set up the extension and the app with the server URL and tokens (see below).
 
 ### Server URL and tokens
@@ -94,12 +117,12 @@ Treat both tokens like passwords. To change them, delete `server\.env`, run `ins
 the new tokens in the extension and the app.
 
 The server has no window of its own; it runs invisibly in the background. To see it, double-click
-`server\monitor.bat`. It shows whether both tasks run, how many Teams computers and Call Bridge apps
-are connected, and the server's log as it happens. Closing that window doesn't stop the server.
+`server\monitor.bat`. It shows whether all three tasks run, how many Teams computers and Call Bridge
+apps are connected, and the server's log as it happens. Closing that window doesn't stop the server.
 
-Logs are in `server\logs\`. If the server was stopped, double-click `server\start.bat`. It starts both tasks
-(it asks for administrator rights) and checks that the site answers. Don't use `npm start` on the VPS:
-the task already runs the server with the tokens from `.env`.
+Logs are in `server\logs\` (`turn.log` for the TURN relay). If the server was stopped, double-click
+`server\start.bat`. It starts all three tasks (it asks for administrator rights) and checks that the
+site answers. Don't use `npm start` on the VPS: the task already runs the server with the tokens from `.env`.
 Remove everything with `server\deploy\windows\uninstall.ps1`.
 
 ## Deploy elsewhere
@@ -118,6 +141,10 @@ Then put the URL `wss://<your-host>/call` in the extension's side panel. If your
 timeout, make sure it allows WebSockets. The server pings every 20 s to keep connections open.
 `GET /healthz` returns `{ ok: true, calls: n }` for health checks.
 
+Camera control additionally needs `turn-server.js` reachable over UDP at the same hostname (see
+"Camera control" above); most container platforms don't forward arbitrary UDP ports to a container,
+so this piece is the one most likely to need a VM instead.
+
 ## The Call Bridge app (your computer)
 
 1. On your own computer, open `https://<your-server>/` in Chrome or Edge.
@@ -129,6 +156,10 @@ timeout, make sure it allows WebSockets. The server pings every 20 s to keep con
 The app reconnects by itself after a network drop or a server restart. "Teams computer linked" shows that the extension is online.
 Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
 
+**Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
+"Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
+only needed while actually in control. **Stop camera** hands the video back; leaving the call does the same.
+
 ## Protocol
 
 Plug your own handler in here, for example a speech bot, instead of the operator console.
@@ -136,13 +167,14 @@ Plug your own handler in here, for example a speech bot, instead of the operator
 **`/call`**, used by the extension:
 
 1. The client sends text: `{"type":"hello","token":"…","callId":"<uuid>","caller":"Jane Doe","format":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1,"frameMs":20},"client":"teams-call-answerer/0.2.0"}`
-2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence"}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s.
+2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence","iceServers":[…]}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s. `iceServers` is a standard `RTCConfiguration.iceServers` array pointing at `turn-server.js`, for camera control.
 3. Both directions then carry **binary** frames: PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes).
 4. Mute is shared. The server sends `{"type":"mute","muted"}` when the app presses Mute.
    The extension presses Teams' own Mute button and answers with `{"type":"mute-state","muted"}`, which it also sends when someone mutes in Teams.
-5. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
+5. Camera control: the operator app offers a WebRTC video connection and the extension answers it, relayed as-is: `{"type":"video-offer"|"video-answer","sdp":"…"}` and `{"type":"video-ice","candidate":{…}|null}` either direction, `{"type":"video-stop"}` either direction to end it. The server never looks inside the SDP.
+6. Either side can end the bridge. The server sends `{"type":"stop","reason":"…"}`, and the extension
    then gives the microphone back to Teams. The client sends `{"type":"end","reason":"…"}` when the call ends.
-6. `{"type":"hello",…,"test":true}` is answered with `ready` and closed.
+7. `{"type":"hello",…,"test":true}` is answered with `ready` and closed.
 
 If the extension's connection drops mid-call, it reconnects with the same `callId` up to 3 times.
 The server keeps the session, and its operator, for 15 s.
@@ -154,11 +186,14 @@ every 20 s. The server sends `{"type":"answer"|"decline","ringId","mode"}`.
 A `/call` hello that carries the answered `ringId` is routed to the operator who pressed Answer.
 
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
-sends `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
+sends `{"type":"ready","iceServers":[…]}` then `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
 The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"mute","muted"}`,
 `{"type":"release"}` or `{"type":"stop","callId"}`. The server sends `{"type":"mute-state","callId","muted"}`
 whenever the Teams computer's mute changes.
 Binary frames use the same PCM format.
+Camera control (`callId` required, so the server knows which `/call` to relay to): the client sends
+`{"type":"video-offer","callId","sdp"}` or `{"type":"video-ice"|"video-stop","callId",…}`; the server
+relays `{"type":"video-answer"|"video-ice","sdp"|"candidate"}` back from the extension, unchanged.
 
 ## Test
 
@@ -167,4 +202,6 @@ npm test
 ```
 
 The test starts the server on a random port. It checks authentication, the echo fallback,
-operator take and hand-back, and runs the extension's own `bridge.js` against the server.
+operator take and hand-back, camera-control signaling relay, and runs the extension's own `bridge.js`
+against the server. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
+see `teams-auto-answer/README.md` for how that was verified against a mock Teams page.

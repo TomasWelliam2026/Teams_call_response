@@ -3,11 +3,13 @@
 
   What it does (run it in an elevated PowerShell, from any folder):
     1. Creates server\.env with two new random secrets (only if .env doesn't exist yet).
-    2. Opens TCP 80 and 443 in Windows Firewall (Caddy needs them for HTTPS and its certificate).
-    3. Registers two startup tasks that run as SYSTEM and restart if they stop:
+    2. Opens TCP 80 and 443 (Caddy's HTTPS and certificate) and UDP 3478 plus 49152-49452
+       (the camera-control TURN relay) in Windows Firewall.
+    3. Registers three startup tasks that run as SYSTEM and restart if they stop:
          "CallBridge Server"  node server.js on 127.0.0.1:8080 (not reachable from outside)
          "CallBridge HTTPS"   Caddy: https://<domain> -> 127.0.0.1:8080, free Let's Encrypt certificate
-    4. Starts both and checks https://<domain>/healthz.
+         "CallBridge TURN"    node turn-server.js, the camera-control relay (see README.md)
+    4. Starts all three and checks https://<domain>/healthz.
 
   The domain defaults to <your-public-ip>.sslip.io (e.g. 95-216-122-142.sslip.io), which resolves to
   this server without buying a domain. Pass -Domain bridge.example.com to use your own; point its DNS
@@ -32,7 +34,7 @@ $Caddy = Join-Path $ServerDir 'bin\caddy.exe'
 $Logs = Join-Path $ServerDir 'logs'
 $EnvFile = Join-Path $ServerDir '.env'
 if (-not (Test-Path $Caddy)) { throw "Caddy not found at $Caddy. Download caddy.exe (Windows amd64) from https://github.com/caddyserver/caddy/releases into server\bin." }
-if (-not (Test-Path (Join-Path $ServerDir 'node_modules\ws'))) {
+if (-not (Test-Path (Join-Path $ServerDir 'node_modules\ws')) -or -not (Test-Path (Join-Path $ServerDir 'node_modules\node-turn'))) {
   Push-Location $ServerDir; npm ci --omit=dev; Pop-Location
 }
 New-Item -ItemType Directory -Force $Logs | Out-Null
@@ -74,6 +76,10 @@ if (-not (Get-NetFirewallRule -DisplayName 'CallBridge HTTPS' -ErrorAction Silen
   New-NetFirewallRule -DisplayName 'CallBridge HTTPS' -Direction Inbound -Protocol TCP -LocalPort 80, 443 -Action Allow | Out-Null
   Write-Host 'Opened TCP 80 and 443 in Windows Firewall.'
 }
+if (-not (Get-NetFirewallRule -DisplayName 'CallBridge TURN' -ErrorAction SilentlyContinue)) {
+  New-NetFirewallRule -DisplayName 'CallBridge TURN' -Direction Inbound -Protocol UDP -LocalPort 3478, 49152-49452 -Action Allow | Out-Null
+  Write-Host 'Opened UDP 3478 and 49152-49452 in Windows Firewall (camera-control TURN relay).'
+}
 
 # 3. Startup tasks (SYSTEM, restart on failure, no time limit)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -81,11 +87,14 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $system = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 
-$serverCmd = "`"$Node`" --env-file=.env server.js >> logs\server.log 2>&1"
+# run-server.cmd starts node again if it ever exits (the task's own restart only covers failed starts).
+$serverCmd = "set `"NODE=$Node`"&& deploy\windows\run-server.cmd"
 $caddyCmd = "set XDG_DATA_HOME=$ServerDir\bin\caddy-data&& bin\caddy.exe reverse-proxy --from $Domain --to 127.0.0.1:$Port >> logs\caddy.log 2>&1"
+$turnCmd = "`"$Node`" --env-file=.env turn-server.js >> logs\turn.log 2>&1"
 $tasks = @{
   'CallBridge Server' = $serverCmd
   'CallBridge HTTPS'  = $caddyCmd
+  'CallBridge TURN'   = $turnCmd
 }
 foreach ($name in $tasks.Keys) {
   $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c $($tasks[$name])" -WorkingDirectory $ServerDir
@@ -107,6 +116,7 @@ if ($ok) {
   Write-Host "Ready: https://$Domain/" -ForegroundColor Green
   Write-Host "  Extension side panel  -> Server URL: wss://$Domain/call   Access token: BRIDGE_TOKEN from $EnvFile"
   Write-Host "  Operator console      -> https://$Domain/   Operator token: OPERATOR_TOKEN from $EnvFile"
+  Write-Host "  Camera control's TURN relay is on UDP 3478 (same domain); the server hands out its address automatically."
 } else {
   Write-Host "Not reachable yet over HTTPS. Check $Logs\caddy.log." -ForegroundColor Yellow
   Write-Host 'If your VPS provider has its own firewall (e.g. Hetzner Cloud Firewall), allow inbound TCP 80 and 443 there too.'
