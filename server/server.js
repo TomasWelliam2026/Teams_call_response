@@ -94,7 +94,7 @@ function giveCallTo(call, op) {
   }
   call.operator = op;
   op.callId = call.id;
-  sendJson(op, { type: 'taken', callId: call.id, caller: call.caller });
+  sendJson(op, { type: 'taken', callId: call.id, caller: call.caller, muted: !!call.muted });
 }
 
 function endCall(call, reason) {
@@ -157,6 +157,10 @@ function onCallSocket(ws) {
       }
       sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK });
       broadcastCalls();
+    } else if (msg.type === 'mute-state' && call) {
+      // The Teams computer's mute state (Teams' own Mute button, or the app's request applied there).
+      call.muted = !!msg.muted;
+      if (call.operator) sendJson(call.operator, { type: 'mute-state', callId: call.id, muted: call.muted });
     } else if (msg.type === 'end' && call) {
       endCall(call, msg.reason || 'extension ended the call');
       call = null;
@@ -227,6 +231,11 @@ function onOperatorSocket(ws) {
         }
         sendJson(ring.station, { type: msg.type, ringId: ring.ringId, mode: 'audio' });
         log(`ring ${ring.ringId.slice(0, 8)}: operator pressed ${msg.type}`);
+        break;
+      }
+      case 'mute': { // the app's Mute button: mute (or unmute) on the Teams computer too
+        const mine = myCall();
+        if (mine?.operator === ws) sendJson(mine.ws, { type: 'mute', muted: !!msg.muted });
         break;
       }
       case 'release':

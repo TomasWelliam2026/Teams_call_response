@@ -174,6 +174,7 @@
       callId,
       sync,
       play: (pcm) => engine.play(pcm),
+      setMuted: (muted) => engine.setMuted(muted),
       stop,
       owns: (sender) => injected.has(sender),
       setOriginal,
@@ -191,8 +192,10 @@
       await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 300))]);
       if (ctx.state !== 'running') { ctx.close(); return null; }
     }
-    // Outgoing: server audio (+ optionally the real mic) -> one track that replaces Teams' mic.
+    // Outgoing: server audio (+ optionally the real mic) -> mute gain -> one track that replaces Teams' mic.
     const out = ctx.createMediaStreamDestination();
+    const outGain = new GainNode(ctx, { gain: 1 });
+    outGain.connect(out);
     const mics = new Map(); // sender -> MediaStreamAudioSourceNode
     // Incoming: every remote audio track -> mono mix -> anti-alias filter -> tap -> 16 kHz PCM.
     const mix = ctx.createGain();
@@ -234,7 +237,7 @@
         mics.delete(sender);
         if (!track) return;
         const mic = ctx.createMediaStreamSource(new MediaStream([track]));
-        mic.connect(out);
+        mic.connect(outGain);
         mics.set(sender, mic);
       },
       play(pcm) {
@@ -247,9 +250,12 @@
         if (nextTime < now + 0.01) nextTime = now + START_BUFFER_S;
         if (nextTime > now + MAX_AHEAD_S) return;
         const src = new AudioBufferSourceNode(ctx, { buffer: buf });
-        src.connect(out);
+        src.connect(outGain);
         src.start(nextTime);
         nextTime += buf.duration;
+      },
+      setMuted(muted) {
+        outGain.gain.setValueAtTime(muted ? 0 : 1, ctx.currentTime);
       },
       close() {
         for (const m of mics.values()) m.disconnect();
@@ -273,6 +279,7 @@
     const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
     const writer = generator.writable.getWriter();
     let timestamp = 0; // µs, must only grow
+    let muted = false;
     const remotes = new Map(); // track -> { reader, queue: number[] of 16 kHz samples }
     let primary = null; // the first remote track paces the frames; others are mixed into it
     const toFrames = framer(emitPcm);
@@ -341,11 +348,12 @@
         if (primary === track) primary = remotes.keys().next().value || null;
       },
       setMic() {},
+      setMuted(value) { muted = value; },
       play(pcm) {
         const samples = new Int16Array(pcm);
         if (!samples.length) return;
-        const f32 = new Float32Array(samples.length);
-        for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
+        const f32 = new Float32Array(samples.length); // stays silent while muted
+        if (!muted) for (let i = 0; i < samples.length; i++) f32[i] = samples[i] / 0x8000;
         const data = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfFrames: f32.length, numberOfChannels: 1, timestamp, data: f32 });
         timestamp += Math.round(f32.length * 1e6 / RATE);
         writer.write(data).catch(() => {});
@@ -434,6 +442,7 @@
       case 'config': options = { ...options, ...data.options }; break;
       case 'arm': arm(data.callId); break;
       case 'audio': if (bridge?.callId === data.callId) bridge.play(data.pcm); break;
+      case 'mute': if (bridge?.callId === data.callId) bridge.setMuted(!!data.muted); break;
       case 'stop': disarm(); if (!data.callId || bridge?.callId === data.callId) bridge?.stop(data.reason || 'Stopped.'); break;
     }
   }

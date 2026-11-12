@@ -14,8 +14,9 @@
     days: [1, 2, 3, 4, 5],   // 0 = Sunday
     notify: true,
     keepAlive: true,         // stop the browser from discarding Teams tabs
-    // Audio bridge: after a call is answered, stream it to serverUrl (access token lives in storage.local).
-    bridgeEnabled: false,
+    // Audio bridge: after a person answers, stream the call to serverUrl (access token lives in
+    // storage.local). Always on since 0.4: entering the URL and token is the whole setup.
+    bridgeEnabled: true,
     serverUrl: '',
     bridgeKeepMic: false,    // also send the real microphone, mixed with the server's audio
     // Advanced: regex overrides, e.g. for a non-English Teams UI.

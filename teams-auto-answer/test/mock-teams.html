@@ -122,7 +122,18 @@
         call.el = el;
       };
       teams.ontrack = (e) => { const el = new Audio(); el.muted = true; el.srcObject = new MediaStream([e.track]); el.play().catch(() => {}); };
-      call = { ctx, teams, remote, analyser };
+      // Teams' in-call mic button (same data-tid and labels as Teams web).
+      const micButton = document.createElement('button');
+      micButton.dataset.tid = 'microphone-button';
+      micButton.setAttribute('aria-label', 'Mute mic');
+      micButton.textContent = 'Mic';
+      micButton.onclick = () => {
+        const nowMuted = micButton.getAttribute('aria-label') === 'Mute mic';
+        micButton.setAttribute('aria-label', nowMuted ? 'Unmute mic' : 'Mute mic');
+        logEvent(`Teams mic button: ${nowMuted ? 'muted' : 'unmuted'}`);
+      };
+      document.querySelector('.controls').append(micButton);
+      call = { ctx, teams, remote, analyser, micButton };
       const offer = await teams.createOffer();
       await teams.setLocalDescription(offer);
       await remote.setRemoteDescription(offer);
@@ -133,6 +144,7 @@
     }
     function hangup() {
       if (!call) return;
+      call.micButton?.remove();
       call.teams.close();
       call.remote.close();
       call.ctx.close();

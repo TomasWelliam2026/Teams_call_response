@@ -6,44 +6,53 @@
   <link rel="stylesheet" href="panel.css">
 </head>
 <body>
-  <header>
+  <header class="brand">
     <h1>Teams Call Answerer</h1>
-    <label class="switch" title="Auto-answer">
-      <input type="checkbox" id="enabled">
-      <span>Auto-answer</span>
-    </label>
+    <p class="hint">Links this Teams computer to your Call Bridge server, so calls can be answered from the Call Bridge app.</p>
   </header>
 
-  <section class="actions">
-    <button data-action="audio" class="primary">Answer (audio)</button>
-    <button data-action="video">Answer (video)</button>
-    <button data-action="decline" class="danger">Decline</button>
-  </section>
-  <p id="status" class="status" role="status"></p>
-
-  <section>
-    <h2>Audio bridge</h2>
-    <label class="check"><input type="checkbox" id="bridgeEnabled"> Stream calls I answer in Teams to my server</label>
-    <p class="hint">When you click Teams' own Answer button, the caller's audio goes to the server and the server's audio is sent to the caller in place of your microphone. Calls answered from this panel, a shortcut or auto-answer aren't streamed.</p>
+  <section class="card" aria-labelledby="connTitle">
+    <div class="card-head">
+      <h2 id="connTitle">Server connection</h2>
+      <span class="pill" id="stationStatus" data-state="off" role="status">
+        <span class="dot"></span><span id="stationText">Not set up</span>
+      </span>
+    </div>
     <label for="serverUrl">Server URL</label>
-    <input type="text" id="serverUrl" placeholder="wss://bridge.example.com/call" spellcheck="false" autocomplete="off">
+    <input type="text" id="serverUrl" placeholder="wss://your-server/call" spellcheck="false" autocomplete="off">
     <label for="bridgeToken">Access token</label>
-    <input type="password" id="bridgeToken" autocomplete="off" spellcheck="false">
-    <label class="check"><input type="checkbox" id="bridgeKeepMic"> Also send my microphone</label>
-    <div class="bridge-status" id="stationStatus" data-state="off">
-      <span class="dot"></span><span id="stationText">Server link: off</span>
+    <div class="secret">
+      <input type="password" id="bridgeToken" autocomplete="off" spellcheck="false">
+      <button type="button" id="showToken" class="ghost" aria-pressed="false">Show</button>
+    </div>
+    <p id="connDetail" class="detail">Enter the server URL and access token. It connects automatically.</p>
+  </section>
+
+  <section class="card" aria-labelledby="callTitle">
+    <div class="card-head">
+      <h2 id="callTitle">Call</h2>
+      <button id="bridgeStop" class="danger small">Stop bridge</button>
     </div>
     <div class="bridge-status" id="bridgeStatus" data-state="idle">
       <span class="dot"></span><span id="bridgeText">Idle</span>
     </div>
-    <div class="row">
-      <button id="bridgeTest">Test connection</button>
-      <button id="bridgeStop" class="danger">Stop bridge</button>
-    </div>
   </section>
+  <p id="status" class="status" role="status"></p>
 
-  <section>
-    <h2>Auto-answer rules</h2>
+  <details class="more">
+    <summary>More settings</summary>
+
+    <h3>Answer from this computer</h3>
+    <section class="actions">
+      <button data-action="audio" class="primary">Answer (audio)</button>
+      <button data-action="video">Answer (video)</button>
+      <button data-action="decline" class="danger">Decline</button>
+    </section>
+    <p class="hint">Calls answered here, by a shortcut or by auto-answer aren't streamed to the server.</p>
+    <label class="check"><input type="checkbox" id="bridgeKeepMic"> Mix this computer's microphone into streamed calls</label>
+
+    <h3>Auto-answer</h3>
+    <label class="check"><input type="checkbox" id="enabled"> Answer incoming calls automatically</label>
     <div class="row">
       <label for="mode">Answer with</label>
       <select id="mode">
@@ -59,7 +68,6 @@
     <textarea id="allowlist" rows="2" placeholder="Jane Doe"></textarea>
     <label for="blocklist">Never auto-answer <small>(one per line)</small></label>
     <textarea id="blocklist" rows="2"></textarea>
-
     <label class="check"><input type="checkbox" id="hoursEnabled"> Only during active hours</label>
     <div id="hours" class="hours">
       <div class="row">
@@ -68,19 +76,14 @@
       </div>
       <div class="days" id="days"></div>
     </div>
-
     <label class="check"><input type="checkbox" id="notify"> Notify me when a call is auto-answered</label>
     <label class="check"><input type="checkbox" id="keepAlive"> Keep Teams tabs from being put to sleep</label>
-  </section>
 
-  <section>
-    <h2>Shortcuts <small>(work in any app)</small></h2>
+    <h3>Shortcuts <small>(work in any app)</small></h3>
     <ul id="shortcuts" class="shortcuts"></ul>
     <button id="editShortcuts" class="link">Change shortcuts…</button>
-  </section>
 
-  <details>
-    <summary>Advanced: button detection</summary>
+    <h3>Button detection</h3>
     <p class="hint">Regex overrides for a non-English Teams UI or after a Teams redesign. Leave empty for defaults.</p>
     <label for="customContext">Incoming-call text</label>
     <input type="text" id="customContext" spellcheck="false">
