@@ -6,7 +6,10 @@
 //              binary PCM s16le, mono, 16 kHz, 20 ms frames, both directions.
 //   /operator  The local app (public/, installable) connects here. It shows ringing calls; Answer
 //              makes the extension answer in Teams and routes that call's audio to this operator,
-//              who hears the caller and whose microphone goes to the caller.
+//              who hears the caller and whose microphone goes to the caller. On a call, "Take full
+//              control" additionally offers a WebRTC video connection (signaled through /call and
+//              /operator as video-offer/-answer/-ice/-stop, relayed as-is below) carrying the
+//              operator's camera into the Teams call; turn-server.js is its TURN relay.
 //   /healthz   Liveness check for your hosting platform.
 //
 // A call nobody has taken is handled by FALLBACK: "silence" (default) or "echo" (the caller
@@ -23,6 +26,8 @@ const HOST = process.env.HOST || '0.0.0.0'; // 127.0.0.1 when a local HTTPS prox
 const CALL_TOKEN = process.env.BRIDGE_TOKEN || '';
 const OPERATOR_TOKEN = process.env.OPERATOR_TOKEN || CALL_TOKEN;
 const FALLBACK = process.env.FALLBACK === 'echo' ? 'echo' : 'silence';
+const TURN_PORT = Number(process.env.TURN_PORT) || 3478;
+const TURN_USERNAME = 'call-bridge'; // must match turn-server.js
 const HELLO_TIMEOUT_MS = 5000;
 const RESUME_GRACE_MS = 15000;   // a call whose extension reconnects within this keeps its operator
 const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 };
@@ -57,6 +62,13 @@ function tokenMatches(given, expected) {
 }
 
 const sendJson = (ws, msg) => { if (ws?.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); };
+
+// The TURN relay (turn-server.js) runs on the same host, reachable at whatever hostname the client
+// used to reach this server (ws.host, from the Host header) — same domain/IP, different port/protocol.
+const iceServersFor = (ws) => [
+  { urls: `stun:${ws.host}:${TURN_PORT}` },
+  { urls: `turn:${ws.host}:${TURN_PORT}`, username: TURN_USERNAME, credential: CALL_TOKEN },
+];
 
 // ---- State -------------------------------------------------------------------------------
 
@@ -155,12 +167,16 @@ function onCallSocket(ws) {
         if (op && operators.has(op)) giveCallTo(call, op);
         log(`call ${id.slice(0, 8)} started (${msg.client || 'unknown client'})${op ? ', answered from the local app' : ''}`);
       }
-      sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK });
+      sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK, iceServers: iceServersFor(ws) });
       broadcastCalls();
     } else if (msg.type === 'mute-state' && call) {
       // The Teams computer's mute state (Teams' own Mute button, or the app's request applied there).
       call.muted = !!msg.muted;
       if (call.operator) sendJson(call.operator, { type: 'mute-state', callId: call.id, muted: call.muted });
+    } else if ((msg.type === 'video-answer' || msg.type === 'video-ice' || msg.type === 'video-stop') && call) {
+      // Camera control signaling (see README.md "Camera control"): the extension is the answerer,
+      // the operator app is the offerer. Just relay; the server never looks inside the SDP.
+      if (call.operator) sendJson(call.operator, msg);
     } else if (msg.type === 'end' && call) {
       endCall(call, msg.reason || 'extension ended the call');
       call = null;
@@ -207,7 +223,7 @@ function onOperatorSocket(ws) {
       if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
       authed = true;
       operators.add(ws);
-      sendJson(ws, { type: 'ready', format: FORMAT, fallback: FALLBACK });
+      sendJson(ws, { type: 'ready', format: FORMAT, fallback: FALLBACK, iceServers: iceServersFor(ws) });
       broadcastCalls();
       return;
     }
@@ -243,6 +259,11 @@ function onOperatorSocket(ws) {
         break;
       case 'stop': // hand the call back to the person at the Teams computer
         if (call) { sendJson(call.ws, { type: 'stop', reason: 'An operator handed the call back.' }); endCall(call, 'operator handed it back'); }
+        break;
+      case 'video-offer':
+      case 'video-ice':
+      case 'video-stop': // camera control signaling: the operator is the offerer, relay to the extension
+        if (call?.operator === ws) sendJson(call.ws, msg);
         break;
     }
     broadcastCalls();
@@ -366,6 +387,7 @@ server.on('upgrade', (req, socket, head) => {
     ws.who = WHO[pathname];
     // Behind Caddy the peer is 127.0.0.1; the real address is in X-Forwarded-For.
     ws.remote = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress).split(',')[0].trim();
+    ws.host = String(req.headers.host || '').split(':')[0]; // for iceServersFor(): same domain the client used to reach us
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
     ws.on('error', (err) => log('socket error:', err.message));
