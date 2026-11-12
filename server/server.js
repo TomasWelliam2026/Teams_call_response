@@ -40,7 +40,11 @@ const TYPES = {
 const CLOSE = { unauthorized: 4001, badHello: 4002, replaced: 4003 };
 
 if (CALL_TOKEN.length < 16) {
-  console.error('Set BRIDGE_TOKEN to a random secret of at least 16 characters, e.g.\n  BRIDGE_TOKEN=$(node -e "console.log(crypto.randomBytes(24).toString(\'base64url\'))") npm start');
+  console.error([
+    'BRIDGE_TOKEN is not set (it must be a random secret of at least 16 characters).',
+    'On the Windows VPS the server runs by itself as the "CallBridge Server" task: use start.bat to start it.',
+    'To run it by hand: node --env-file=.env server.js   (or set BRIDGE_TOKEN and run npm start)',
+  ].join('\n'));
   process.exit(1);
 }
 
@@ -348,6 +352,11 @@ const heartbeat = setInterval(() => {
   }
 }, 20000);
 
+server.on('error', (err) => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  console.error(`Port ${PORT} is already in use: the bridge server is probably already running (on the VPS, as the "CallBridge Server" task).`);
+  process.exit(1);
+});
 server.listen(PORT, HOST, () => log(`bridge server on ${HOST}:${PORT} (fallback: ${FALLBACK})`));
 
 function shutdown() {
