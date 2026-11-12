@@ -102,11 +102,16 @@ It does nothing until armed. Then it taps the remote audio tracks with Web Audio
 resamples them to 16 kHz, and swaps the outgoing microphone track (`RTCRtpSender.replaceTrack`) for one that plays the server audio.
 `content.js` relays the audio to the background worker, which holds the WebSocket (`bridge.js`), and is what decides *when* to
 arm: a trusted press on a detected call's Accept button (`personAnswered()`), the app answering remotely (`remote-answer`), or,
-for a meeting, `checkMeetingJoin()` noticing the in-call toolbar (strictly `[data-tid="hangup-button"]` +
-`[data-tid="microphone-button"]`, unlike the looser label-matching `hangupButton()` used to press End call,
-since a false match here would arm the bridge on a page that merely has a "Leave team" button somewhere).
-It keeps re-checking every scan (polled every 2 s as a MutationObserver fallback) until the bridge is actually up,
-so it also self-heals if the bridge drops while the meeting continues.
+for a meeting, `checkMeetingJoin()` noticing the in-call toolbar - strictly by `data-tid`, unlike the
+looser label-matching `hangupButton()` used to press End call, since a false match here would arm the
+bridge on a page that merely has a "Leave team" button somewhere. A 1:1 call's Leave button is
+`data-tid="hangup-button"`; a meeting's is `"hangup-main-btn"` - same control, different surface,
+confirmed against live Teams for both. A meeting's Mic/Camera buttons also drop `data-tid` entirely
+(label only), so `callUiActive()` pairs the Leave tid with a second, still tid-based signal
+(`[data-tid="microphone-button"], [data-tid="camera-button"], [data-tid="myself-video-more-menu"]`)
+to confirm it's really a call/meeting toolbar. It keeps re-checking every scan (polled every 2 s as a
+MutationObserver fallback) until the bridge is actually up, so it also self-heals if the bridge drops
+while the meeting continues.
 
 > **Consent.** The bridge sends other people's voices to a server. In many places, including several US states and the EU,
 > everyone on the call must be told, or must agree, before a call is recorded or relayed. Your organization's Teams policy
@@ -230,6 +235,5 @@ once the mock's own peers are manually renegotiated (real Teams does this on its
 - Camera control adds a video transceiver to a call that started audio-only the same way the mic bridge
   handles a muted computer: it counts on Teams renegotiating on its own in response. Verified against
   the mock page (see above) and live Teams.
-- Meeting-join detection (`checkMeetingJoin()`) is verified against the mock page; `data-tid="hangup-button"`
-  and `data-tid="microphone-button"` themselves are confirmed against live Teams (real calls, not yet a real
-  meeting), since camera control and mute sync already depend on those same two attributes.
+- Meeting-join detection, camera control and End call are all verified against a real Teams meeting
+  (two real accounts, joined - not answered - with no ring at all), not just the mock page.
