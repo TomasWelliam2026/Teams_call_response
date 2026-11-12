@@ -312,7 +312,8 @@ function onStationSocket(ws) {
 const server = http.createServer((req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
   if (pathname === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, calls: calls.size }));
+    const health = { ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size, teamsComputers: stations.size, apps: operators.size };
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(health));
     return;
   }
   const file = STATIC[pathname];
