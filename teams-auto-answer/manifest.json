@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.5.1",
-  "description": "Answer Microsoft Teams (web) calls with shortcuts or auto-answer, and bridge answered calls' audio to your server.",
+  "version": "0.6.0",
+  "description": "Links Teams web to your Call Bridge server, so calls ring, are answered and are talked on from the Call Bridge app.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "notifications", "tabs", "sidePanel", "alarms"],
+  "permissions": ["storage", "tabs", "sidePanel", "alarms"],
   "host_permissions": [
     "https://teams.microsoft.com/*",
     "https://teams.cloud.microsoft/*",
@@ -36,34 +36,10 @@
       "all_frames": true
     }
   ],
-  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
   "action": {
-    "default_title": "Teams Call Answerer",
-    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png" }
+    "default_title": "Teams Call Answerer: server connection"
   },
   "side_panel": {
     "default_path": "panel.html"
-  },
-  "commands": {
-    "accept-audio": {
-      "suggested_key": { "default": "Ctrl+Shift+1", "mac": "Command+Shift+1" },
-      "description": "Accept incoming call (audio)",
-      "global": true
-    },
-    "accept-video": {
-      "suggested_key": { "default": "Ctrl+Shift+2", "mac": "Command+Shift+2" },
-      "description": "Accept incoming call (video)",
-      "global": true
-    },
-    "decline": {
-      "suggested_key": { "default": "Ctrl+Shift+3", "mac": "Command+Shift+3" },
-      "description": "Decline incoming call",
-      "global": true
-    },
-    "toggle-auto-answer": {
-      "suggested_key": { "default": "Ctrl+Shift+4", "mac": "Command+Shift+4" },
-      "description": "Turn auto-answer on/off",
-      "global": true
-    }
   }
 }
