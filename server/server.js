@@ -29,12 +29,14 @@ const FALLBACK = process.env.FALLBACK === 'echo' ? 'echo' : 'silence';
 const TURN_PORT = Number(process.env.TURN_PORT) || 3478;
 const TURN_USERNAME = 'call-bridge'; // must match turn-server.js
 const HELLO_TIMEOUT_MS = 5000;
-const RESUME_GRACE_MS = 15000;   // a call whose extension reconnects within this keeps its operator
+const RESUME_GRACE_MS = 60000;   // a call whose extension or operator reconnects within this carries on where it was
+const HOLD_FRAMES = 3000;        // up to 60 s of audio held for a side that is reconnecting, delivered when it's back
 const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ANSWER_ROUTE_MS = 60000;   // after Answer in the local app, the call that connects within this goes to that operator
+const ENDED_MEMORY_MS = 10 * 60000; // how long an ended call's id is remembered, to tell a reconnecting app it's over
 const STATIC = {
-  '/': 'index.html', '/console.js': 'console.js', '/console.css': 'console.css',
+  '/': 'index.html', '/console.js': 'console.js', '/capture-worklet.js': 'capture-worklet.js', '/console.css': 'console.css',
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
 };
 const TYPES = {
@@ -72,8 +74,18 @@ const iceServersFor = (ws) => [
 
 // ---- State -------------------------------------------------------------------------------
 
-/** callId -> { id, caller, ws, operator, startedAt, endTimer, framesIn } */
+/**
+ * callId -> { id, caller, ws, operator, startedAt, endTimer, operatorTimer, awaitingOperator,
+ *             in: Ring, out: Ring, resent, lost: { in, out } }
+ * in: caller -> operator audio, out: operator -> caller audio. Every frame is numbered; the last
+ * HOLD_FRAMES of each direction are kept so a side that reconnects (after a network blip, or a
+ * connection that died without anyone noticing yet) gets exactly the frames it is missing.
+ */
 const calls = new Map();
+/** callId -> reason, for calls that ended recently */
+const endedCalls = new Map();
+/** callId -> { op, have, timer }: an app resuming a call this server doesn't know (yet), e.g. after a restart */
+const pendingResume = new Map();
 const operators = new Set();
 const stations = new Set();
 /** ringId -> { ringId, caller, station, since, answering } — Teams calls ringing right now */
@@ -97,29 +109,68 @@ function broadcastCalls() {
   for (const op of operators) sendJson(op, { ...msg, mine: op.callId || null });
 }
 
-/** Routes a call's audio to an operator, releasing whatever call they had before. */
-function giveCallTo(call, op) {
+/** Routes a call's audio to an operator, releasing whatever call they had before. `have` (when the
+ * app is resuming the call) is how many of the caller's frames it already received; it gets the rest. */
+function giveCallTo(call, op, have = null) {
   const previous = op.callId && calls.get(op.callId);
   if (previous && previous !== call && previous.operator === op) {
     previous.operator = null;
     sendJson(op, { type: 'released', callId: previous.id, reason: 'took another call' });
   }
   call.operator = op;
+  call.awaitingOperator = false;
   op.callId = call.id;
-  sendJson(op, { type: 'taken', callId: call.id, caller: call.caller, muted: !!call.muted });
+  // seq: number of the last caller frame the app has (it counts on from there);
+  // got: how many of the app's own frames the server has (it sends again everything after that).
+  sendJson(op, { type: 'taken', callId: call.id, caller: call.caller, muted: !!call.muted, seq: have ?? call.in.count, got: call.out.count });
+  if (have !== null) account(call, 'in', replay(call.in, have, op));
+}
+
+/** One direction of a call's audio: how many frames so far, and the last HOLD_FRAMES of them. */
+const ring = (count = 0) => ({ count, frames: [] });
+
+function record(r, data) {
+  r.count++;
+  r.frames.push({ seq: r.count, data: Buffer.from(data) });
+  if (r.frames.length > HOLD_FRAMES) r.frames.shift();
+}
+
+/** Sends `ws` every frame after the first `have`; frames too old to still be held are counted as lost. */
+function replay(r, have, ws) {
+  const oldest = r.frames.length ? r.frames[0].seq : r.count + 1;
+  const lost = Math.max(0, oldest - 1 - have);
+  let resent = 0;
+  for (const f of r.frames) if (f.seq > have) { ws.send(f.data, { binary: true }); resent++; }
+  return { resent, lost };
+}
+
+const secondsOf = (frames) => `${(frames / 50).toFixed(1)} s`;
+
+function account(call, dir, { resent, lost }) {
+  call.resent += resent;
+  call.lost[dir] += lost;
+  if (lost) log(`call ${call.id.slice(0, 8)}: ${secondsOf(lost)} of audio ${dir === 'in' ? 'from' : 'to'} the caller was too old to deliver`);
 }
 
 function endCall(call, reason) {
   clearTimeout(call.endTimer);
+  clearTimeout(call.operatorTimer);
+  clearTimeout(call.rewindTimer);
   if (calls.get(call.id) !== call) return; // already ended (e.g. operator handed back, then the extension said goodbye)
   calls.delete(call.id);
+  endedCalls.set(call.id, reason);
+  setTimeout(() => endedCalls.delete(call.id), ENDED_MEMORY_MS).unref();
   if (call.operator) {
     sendJson(call.operator, { type: 'released', callId: call.id, reason });
     call.operator.callId = null;
     call.operator = null;
   }
   const secs = Math.round((Date.now() - call.startedAt) / 1000);
-  log(`call ${call.id.slice(0, 8)} ended after ${secs} s, ${call.framesIn} audio frames from the caller (${(call.framesIn / 50).toFixed(1)} s of audio): ${reason}`);
+  const lost = call.lost.in || call.lost.out
+    ? `LOST ${secondsOf(call.lost.in)} from the caller, ${secondsOf(call.lost.out)} to the caller`
+    : 'nothing lost';
+  log(`call ${call.id.slice(0, 8)} ended after ${secs} s: caller -> app ${call.in.count} frames (${secondsOf(call.in.count)}), `
+    + `app -> caller ${call.out.count} frames (${secondsOf(call.out.count)}), ${call.resent} re-sent after reconnects, ${lost}: ${reason}`);
   broadcastCalls();
 }
 
@@ -131,10 +182,11 @@ function onCallSocket(ws) {
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
-      if (!call) return;
-      call.framesIn++;
+      if (!call || call.ws !== ws) return; // a replaced connection's late frames would arrive out of order
+      if (call.rewinding) return;         // frames still in flight from before a rewind (see resumeCall); they come again
+      record(call.in, data);
       if (call.operator) call.operator.send(data, { binary: true });
-      else if (FALLBACK === 'echo') ws.send(data, { binary: true });
+      else if (!call.awaitingOperator && FALLBACK === 'echo') ws.send(data, { binary: true });
       return;
     }
     let msg;
@@ -152,22 +204,43 @@ function onCallSocket(ws) {
         return ws.close(1000, 'test ok');
       }
       const id = typeof msg.callId === 'string' && /^[\w-]{8,64}$/.test(msg.callId) ? msg.callId : crypto.randomUUID();
+      // have: how many of the app's frames the extension already received; sent: how many caller frames it has sent.
+      const have = Math.max(0, Number(msg.have) || 0);
+      let resumed = false;
       call = calls.get(id);
       if (call) {
         // The extension reconnected after a network blip: keep the session and its operator.
         clearTimeout(call.endTimer);
         if (call.ws && call.ws !== ws) call.ws.close(CLOSE.replaced, 'replaced');
         call.ws = ws;
-        log(`call ${id.slice(0, 8)} resumed`);
+        call.rewinding = false; // a rewind asked of the old connection is moot: 'got' below covers it
+        resumed = true;
+        log(`call ${id.slice(0, 8)} resumed (extension reconnected)`);
       } else {
-        call = { id, caller: String(msg.caller || 'Unknown caller').slice(0, 120), ws, operator: null, startedAt: Date.now(), endTimer: null, framesIn: 0 };
+        // A call this server hasn't seen: new, or (after a server restart) one already under way, whose
+        // numbering carries on from what the extension and the resuming app say they have.
+        const resume = pendingResume.get(id);
+        pendingResume.delete(id);
+        clearTimeout(resume?.timer);
+        const sent = Math.max(0, Number(msg.sent) || 0);
+        const since = Number(msg.since);
+        call = {
+          id, caller: String(msg.caller || 'Unknown caller').slice(0, 120), ws, operator: null,
+          startedAt: since > 0 && since <= Date.now() ? since : Date.now(),
+          endTimer: null, operatorTimer: null, awaitingOperator: false,
+          in: ring(resume ? Math.min(sent, resume.have) : sent), out: ring(have), resent: 0, lost: { in: 0, out: 0 },
+        };
         calls.set(id, call);
-        const op = answeredBy.get(msg.ringId);
+        endedCalls.delete(id);
+        const op = answeredBy.get(msg.ringId) || resume?.op;
         answeredBy.delete(msg.ringId);
         if (op && operators.has(op)) giveCallTo(call, op);
-        log(`call ${id.slice(0, 8)} started (${msg.client || 'unknown client'})${op ? ', answered from the local app' : ''}`);
+        log(`call ${id.slice(0, 8)} started (${msg.client || 'unknown client'})${resume ? ', picked up again by the app that had it' : op ? ', answered from the local app' : ''}`);
       }
-      sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK, iceServers: iceServersFor(ws) });
+      call.canRewind = 'have' in msg; // extension 0.5.1 and later
+      // got: the extension sends again every caller frame after this one.
+      sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK, iceServers: iceServersFor(ws), got: call.in.count });
+      if (resumed) account(call, 'out', replay(call.out, have, ws)); // after 'ready': the extension ignores audio before it
       broadcastCalls();
     } else if (msg.type === 'mute-state' && call) {
       // The Teams computer's mute state (Teams' own Mute button, or the app's request applied there).
@@ -177,6 +250,12 @@ function onCallSocket(ws) {
       // Camera control signaling (see README.md "Camera control"): the extension is the answerer,
       // the operator app is the offerer. Just relay; the server never looks inside the SDP.
       if (call.operator) sendJson(call.operator, msg);
+    } else if (msg.type === 'rewound' && call) {
+      call.rewinding = false; // what follows is the re-sent audio (see resumeCall)
+      clearTimeout(call.rewindTimer);
+    } else if (msg.type === 'note' && call) {
+      // Something worth knowing after the call, e.g. Teams switching media connections.
+      log(`call ${call.id.slice(0, 8)}: ${String(msg.message || '').slice(0, 300)}`);
     } else if (msg.type === 'end' && call) {
       endCall(call, msg.reason || 'extension ended the call');
       call = null;
@@ -189,7 +268,8 @@ function onCallSocket(ws) {
     if (!call || call.ws !== ws || !calls.has(call.id)) return;
     call.ws = null;
     const c = call;
-    c.endTimer = setTimeout(() => endCall(c, 'extension disconnected'), RESUME_GRACE_MS);
+    c.endTimer = setTimeout(() => endCall(c, 'extension disconnected for over a minute'), RESUME_GRACE_MS);
+    log(`call ${c.id.slice(0, 8)}: extension disconnected, holding the app's audio until it reconnects`);
     broadcastCalls();
   });
 }
@@ -204,15 +284,73 @@ function onOperatorSocket(ws) {
 
   function release(reason) {
     const call = myCall();
-    if (call && call.operator === ws) call.operator = null;
+    if (call && call.operator === ws) {
+      call.operator = null;
+      if (reason === 'disconnected') awaitOperator(call);
+    }
     ws.callId = null;
     if (call) sendJson(ws, { type: 'released', callId: call.id, reason });
+  }
+
+  /** The app lost its connection mid-call: hold the caller's audio for it until it resumes the call. */
+  function awaitOperator(call) {
+    call.awaitingOperator = true;
+    const from = call.in.count;
+    clearTimeout(call.operatorTimer);
+    call.operatorTimer = setTimeout(() => {
+      if (call.operator || !call.awaitingOperator) return;
+      call.awaitingOperator = false;
+      call.lost.in += call.in.count - from;
+      log(`call ${call.id.slice(0, 8)}: the app did not come back within a minute`);
+    }, RESUME_GRACE_MS);
+    log(`call ${call.id.slice(0, 8)}: app disconnected, keeping the caller's audio for it`);
+  }
+
+  /** The app reconnected and asks for the call it had; `have` is how many caller frames it received. */
+  function resumeCall(id, have) {
+    const call = calls.get(id);
+    if (call) {
+      if (call.operator && call.operator !== ws) {
+        // Its old connection, which the server hasn't noticed is dead yet: the reconnected app takes over.
+        const stale = call.operator;
+        call.operator = null;
+        stale.callId = null;
+        stale.close(CLOSE.replaced, 'replaced');
+      }
+      clearTimeout(call.operatorTimer);
+      const before = call.resent;
+      const oldest = call.in.frames.length ? call.in.frames[0].seq : call.in.count + 1;
+      if (have < oldest - 1 && call.ws && call.canRewind) {
+        // The app misses frames this server never kept (they went to its previous run, before a
+        // restart). The extension still has them: it sends them again, numbered on from the app's.
+        call.in = ring(have);
+        call.rewinding = true;
+        sendJson(call.ws, { type: 'rewind', from: have });
+        clearTimeout(call.rewindTimer);
+        call.rewindTimer = setTimeout(() => { call.rewinding = false; }, 5000); // never stall the audio on a lost reply
+      }
+      giveCallTo(call, ws, Math.min(have, call.in.count));
+      log(`call ${id.slice(0, 8)} resumed (app reconnected, ${secondsOf(call.resent - before)} re-sent)`);
+    } else if (endedCalls.has(id)) {
+      sendJson(ws, { type: 'released', callId: id, reason: endedCalls.get(id) });
+    } else if (/^[\w-]{8,64}$/.test(id)) {
+      // Unknown here (the server restarted): the call is this app's again once the extension reconnects.
+      clearTimeout(pendingResume.get(id)?.timer);
+      const timer = setTimeout(() => {
+        if (pendingResume.get(id)?.op !== ws) return;
+        pendingResume.delete(id);
+        if (!ws.callId) sendJson(ws, { type: 'released', callId: id, reason: 'the call did not come back' });
+      }, RESUME_GRACE_MS);
+      pendingResume.set(id, { op: ws, have, timer });
+    }
   }
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
       const call = myCall();
-      if (authed && call?.operator === ws && call.ws) call.ws.send(data, { binary: true });
+      if (!authed || call?.operator !== ws) return;
+      record(call.out, data);
+      if (call.ws) call.ws.send(data, { binary: true });
       return;
     }
     let msg;
@@ -224,6 +362,7 @@ function onOperatorSocket(ws) {
       authed = true;
       operators.add(ws);
       sendJson(ws, { type: 'ready', format: FORMAT, fallback: FALLBACK, iceServers: iceServersFor(ws) });
+      if (typeof msg.resume === 'string') resumeCall(msg.resume, Math.max(0, Number(msg.have) || 0));
       broadcastCalls();
       return;
     }
@@ -276,6 +415,7 @@ function onOperatorSocket(ws) {
     clearTimeout(helloTimer);
     release('disconnected');
     operators.delete(ws);
+    for (const [id, p] of pendingResume) if (p.op === ws) { clearTimeout(p.timer); pendingResume.delete(id); }
     broadcastCalls();
   });
 }

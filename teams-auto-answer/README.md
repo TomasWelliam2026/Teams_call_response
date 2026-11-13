@@ -94,12 +94,16 @@ When the call's audio connection is up:
 - The badge shows **LIVE**, and the side panel shows the caller and duration.
 
 The bridge stops, and Teams gets your microphone back, when the call ends, when you click **Stop bridge**, or when the server stops it.
-If the server can't be reached or drops for good, the bridge also stops and your microphone comes back.
+If the server can't be reached for over a minute, the bridge also stops and your microphone comes back. Shorter drops,
+including a server restart, don't lose any audio: the last minute of the call is kept and sent again (see the server README, "No audio lost").
 The access token is stored only on this computer (`chrome.storage.local`), not synced.
 
 How it works: `page-audio.js` runs in Teams' own page context from the first moment, to see the WebRTC connections Teams creates.
-It does nothing until armed. Then it taps the remote audio tracks with Web Audio,
-resamples them to 16 kHz, and swaps the outgoing microphone track (`RTCRtpSender.replaceTrack`) for one that plays the server audio.
+It does nothing until armed. Then it reads every incoming audio track (`MediaStreamTrackProcessor`),
+resamples it to 16 kHz, and swaps the outgoing microphone track (`RTCRtpSender.replaceTrack`) for one that plays the server audio,
+on every connection of the call, including ones Teams adds mid-call.
+When Teams moves a call to another media server, it briefly carries the same audio on two connections; the extension recognizes
+the copies by their loudness pattern and plays them once, switching to the new connection during a pause, so nothing is doubled or cut.
 `content.js` relays the audio to the background worker, which holds the WebSocket (`bridge.js`), and is what decides *when* to
 arm: a trusted press on a detected call's Accept button (`personAnswered()`), the app answering remotely (`remote-answer`), or,
 for a meeting, `checkMeetingJoin()` noticing the in-call toolbar - strictly by `data-tid`, unlike the
@@ -112,6 +116,10 @@ confirmed against live Teams for both. A meeting's Mic/Camera buttons also drop 
 to confirm it's really a call/meeting toolbar. It keeps re-checking every scan (polled every 2 s as a
 MutationObserver fallback) until the bridge is actually up, so it also self-heals if the bridge drops
 while the meeting continues.
+
+To try this without Teams: `test/mock-teams.html` (served by `node test/serve.js`) has `__switchServer()`, `__closeOld()`,
+`__addOtherSpeaker()` and `__speak(seconds)`; `__out` records the loudness of every frame the extension hands on, `__notes` what it noticed.
+Add `?engine=tracks` to test the no-click engine an unattended Teams computer uses.
 
 > **Consent.** The bridge sends other people's voices to a server. In many places, including several US states and the EU,
 > everyone on the call must be told, or must agree, before a call is recorded or relayed. Your organization's Teams policy

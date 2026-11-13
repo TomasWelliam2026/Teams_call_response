@@ -3,21 +3,27 @@
 // mock page can run the exact same code.
 //
 // Wire protocol (see server/README.md), /call — one connection per bridged call:
-//   extension -> server  text  {type:'hello', token, callId, ringId, caller, format, client}   then binary audio frames
-//                              {type:'mute-state', muted} | {type:'video-answer'|'video-ice'|'video-stop', ...}
-//   server -> extension  text  {type:'ready', iceServers} | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
+//   extension -> server  text  {type:'hello', token, callId, ringId, caller, format, client, have, sent}   then binary audio frames
+//                              {type:'mute-state', muted} | {type:'note', message} | {type:'video-answer'|'video-ice'|'video-stop', ...}
+//   server -> extension  text  {type:'ready', iceServers, got} | {type:'rewind', from} (answered with {type:'rewound'})
+//                              | {type:'mute', muted} | {type:'stop', reason} | {type:'error', message}
 //                              | {type:'video-offer'|'video-ice'|'video-stop', ...}  (camera control, see page-audio.js)
 //                              | {type:'end-call'}  (the app pressed "End call": actually hang up, not just release the bridge)
 //   both directions      binary  PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes) per frame
+//
+// Nothing is lost when the connection drops: frames are numbered by their position in the call.
+// On (re)connecting, hello says how many of the app's frames arrived here (have) and the server
+// sends the rest; 'ready' says how many caller frames reached the server (got) and content.js
+// sends the rest again from its own copy (see 'resend').
 //
 // video-* messages are opaque here: just relayed between the port and the socket as-is, so the
 // WebRTC signaling details live only in page-audio.js (page world) and console.js (operator app).
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.5.0';
-  const MAX_RETRIES = 3;           // reconnect attempts after the connection drops mid-call
+  const CLIENT = 'teams-call-answerer/0.5.1';
+  const RECONNECT_FOR_MS = 60000;  // keep reconnecting this long after the connection drops mid-call (the server holds the call as long)
   const HELLO_TIMEOUT_MS = 8000;
-  const MAX_BUFFERED = 64 * 1024;  // drop outgoing audio instead of queueing behind a slow network
+  const STUCK_BUFFERED = 1024 * 1024; // ~30 s of audio not leaving: treat the connection as dead and reconnect
   const CLOSE_UNAUTHORIZED = 4001;
 
   function toBase64(buffer) {
@@ -45,9 +51,12 @@
   }
 
   /**
-   * Serves one "bridge" port opened by content.js after a call was answered.
-   * Port messages in:  {type:'start', callId, caller} | {type:'audio', data: base64} | {type:'mute-state', muted} | {type:'stop', reason}
-   * Port messages out: {type:'connected'} | {type:'audio', data: base64} | {type:'mute', muted} | {type:'stop', reason}
+   * Serves one "bridge" port opened by content.js after a call was answered (or opened again for the
+   * same call, e.g. after this worker restarted; then 'start' carries the counts so far).
+   * Port messages in:  {type:'start', callId, caller, ringId, have, sent} | {type:'audio', seq, data: base64}
+   *                    | {type:'mute-state', muted} | {type:'note', message} | {type:'stop', reason}
+   * Port messages out: {type:'connected'} | {type:'audio', data: base64} | {type:'resend', from} | {type:'mute', muted} | {type:'stop', reason}
+   * Caller audio must come numbered (seq 1, 2, …); after 'resend' content.js sends again from frame from + 1.
    * getConfig() resolves to { serverUrl, token }. onStatus({state, callId, caller, reason}) reports
    * 'connecting' | 'live' | 'reconnecting' | 'ended' | 'error'. 'live' also carries
    * { server, since, resumed } — resumed is true after a reconnect.
@@ -60,9 +69,12 @@
     let ready = false;
     let closed = false;
     let attempts = 0;
+    let lostAt = 0;        // when the connection dropped, while reconnecting
     let helloTimer = null;
     let since = 0;        // when the bridge first went live; reconnects keep it
     let muteState = null; // the Teams computer's mute state, re-sent after (re)connecting
+    let have = 0;         // the app's frames received in this call
+    let sent = 0;         // number of the last caller frame handed to the socket
 
     const status = (state, extra = {}) => onStatus?.({ state, callId, caller, ...extra });
     const toPort = (msg) => { try { port.postMessage(msg); } catch { /* content script went away */ } };
@@ -71,10 +83,10 @@
       ws = new WebSocket(cfg.serverUrl);
       ws.binaryType = 'arraybuffer';
       helloTimer = setTimeout(() => ws.close(), HELLO_TIMEOUT_MS);
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: cfg.token, callId, ringId, caller, format: FORMAT, client: CLIENT }));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: cfg.token, callId, ringId, caller, format: FORMAT, client: CLIENT, have, sent, since: since || undefined }));
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') {
-          if (ready) toPort({ type: 'audio', data: toBase64(e.data) });
+          if (ready) { have++; toPort({ type: 'audio', data: toBase64(e.data) }); }
           return;
         }
         let msg;
@@ -83,12 +95,21 @@
           clearTimeout(helloTimer);
           ready = true;
           attempts = 0;
+          lostAt = 0;
+          // Whatever the server didn't get (sent into a connection that was already dead) goes again.
+          sent = Number.isInteger(msg.got) ? msg.got : sent;
+          toPort({ type: 'resend', from: sent });
           toPort({ type: 'connected' });
           const resumed = since !== 0;
           if (!resumed) since = Date.now();
           status('live', { server: new URL(cfg.serverUrl).host, since, resumed });
           if (muteState !== null) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
           if (msg.iceServers) toPort({ type: 'ice-servers', iceServers: msg.iceServers });
+        } else if (msg.type === 'rewind') {
+          // After a server restart the app missed frames the server no longer has: send them again from `from`.
+          sent = msg.from;
+          ws.send(JSON.stringify({ type: 'rewound' })); // marks where the re-sent frames start
+          toPort({ type: 'resend', from: sent });
         } else if (msg.type === 'mute') {
           toPort({ type: 'mute', muted: !!msg.muted });
         } else if (msg.type === 'stop') {
@@ -104,11 +125,20 @@
         ready = false;
         if (closed) return;
         if (e.code === CLOSE_UNAUTHORIZED) return finish('The server rejected the access token.', true);
-        if (attempts >= MAX_RETRIES) return finish(`Lost the connection to the server (code ${e.code}).`, true);
+        lostAt ||= Date.now();
+        if (Date.now() - lostAt > RECONNECT_FOR_MS) return finish(`Lost the connection to the server for over a minute (code ${e.code}).`, true);
         attempts++;
-        status('reconnecting', { reason: `attempt ${attempts} of ${MAX_RETRIES}` });
-        setTimeout(() => { if (!closed) connect(cfg); }, 1000 * 2 ** (attempts - 1));
+        status('reconnecting', { reason: `attempt ${attempts}; the call's audio is kept and sent once connected` });
+        setTimeout(() => { if (!closed) connect(cfg); }, Math.min(2000, 250 * 2 ** (attempts - 1)));
       };
+    }
+
+    function sendAudio(msg) {
+      // Only the next frame in order: anything else was posted before a 'resend' and comes again.
+      if (!ready || ws.readyState !== WebSocket.OPEN || msg.seq !== sent + 1) return;
+      if (ws.bufferedAmount > STUCK_BUFFERED) { ws.close(); return; }
+      ws.send(fromBase64(msg.data));
+      sent = msg.seq;
     }
 
     function finish(reason, isError = false, fromPort = false) {
@@ -128,11 +158,13 @@
 
     port.onMessage.addListener(async (msg) => {
       if (msg.type === 'audio') {
-        if (ready && ws.readyState === WebSocket.OPEN && ws.bufferedAmount < MAX_BUFFERED) ws.send(fromBase64(msg.data));
+        sendAudio(msg);
       } else if (msg.type === 'start' && !callId) {
         callId = msg.callId;
         caller = msg.caller || 'Unknown caller';
         ringId = msg.ringId || null;
+        have = msg.have || 0;
+        sent = msg.sent || 0;
         const cfg = await getConfig();
         if (closed) return; // the call ended while we were reading settings
         const problem = checkServerUrl(cfg.serverUrl) || (!cfg.token && 'Set the access token in the side panel.');
@@ -142,7 +174,7 @@
       } else if (msg.type === 'mute-state') {
         muteState = !!msg.muted;
         if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute-state', muted: muteState }));
-      } else if (msg.type === 'video-answer' || msg.type === 'video-ice' || msg.type === 'video-stop') {
+      } else if (msg.type === 'video-answer' || msg.type === 'video-ice' || msg.type === 'video-stop' || msg.type === 'note') {
         if (ready && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
       } else if (msg.type === 'stop') {
         finish(msg.reason || 'Call ended.');

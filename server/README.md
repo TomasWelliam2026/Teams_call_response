@@ -160,7 +160,9 @@ so this piece is the one most likely to need a VM instead.
 3. Click **Install app** (or the install icon in the address bar). Call Bridge now has its own window and taskbar icon.
    To start it with Windows, open `chrome://apps`, right-click **Call Bridge**, and choose **Start app when you sign in**.
 
-The app reconnects by itself after a network drop or a server restart. "Teams computer linked" shows that the extension is online.
+The app reconnects by itself after a network drop or a server restart. During a call it keeps the call
+through either (for up to a minute) and nothing said in the meantime is lost: see "No audio lost" below.
+"Teams computer linked" shows that the extension is online.
 Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
 
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
@@ -173,8 +175,9 @@ Plug your own handler in here, for example a speech bot, instead of the operator
 
 **`/call`**, used by the extension:
 
-1. The client sends text: `{"type":"hello","token":"…","callId":"<uuid>","caller":"Jane Doe","format":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1,"frameMs":20},"client":"teams-call-answerer/0.2.0"}`
-2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence","iceServers":[…]}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s. `iceServers` is a standard `RTCConfiguration.iceServers` array pointing at `turn-server.js`, for camera control.
+1. The client sends text: `{"type":"hello","token":"…","callId":"<uuid>","caller":"Jane Doe","format":{"encoding":"pcm_s16le","sampleRate":16000,"channels":1,"frameMs":20},"client":"teams-call-answerer/0.5.1","have":0,"sent":0,"since":<ms>}`
+   (`have`, `sent` and `since` matter on a reconnect, see below).
+2. The server replies with `{"type":"ready","callId":"…","handler":"operator|echo|silence","iceServers":[…],"got":n}`, or closes with code `4001` for a bad token or `4002` for a bad or missing hello within 5 s. `iceServers` is a standard `RTCConfiguration.iceServers` array pointing at `turn-server.js`, for camera control.
 3. Both directions then carry **binary** frames: PCM signed 16-bit little-endian, mono, 16 kHz, 20 ms (640 bytes).
 4. Mute is shared. The server sends `{"type":"mute","muted"}` when the app presses Mute.
    The extension presses Teams' own Mute button and answers with `{"type":"mute-state","muted"}`, which it also sends when someone mutes in Teams.
@@ -183,8 +186,26 @@ Plug your own handler in here, for example a speech bot, instead of the operator
    then gives the microphone back to Teams. The client sends `{"type":"end","reason":"…"}` when the call ends.
 7. `{"type":"hello",…,"test":true}` is answered with `ready` and closed.
 
-If the extension's connection drops mid-call, it reconnects with the same `callId` up to 3 times.
-The server keeps the session, and its operator, for 15 s.
+**No audio lost.** Every frame is numbered by its position in the call, per direction. When a
+connection drops mid-call (or dies without anyone noticing yet), the side reconnects within a minute
+and says how many frames it has; the other side's missing frames are sent again, in order:
+
+- The extension reconnects with the same `callId` for up to a minute; the server keeps the session,
+  and its operator, as long. `hello.have` is how many of the app's frames it received: the server
+  sends the rest (it keeps the last 60 s of each direction). `ready.got` is how many caller frames the
+  server has: the extension sends again everything after that (it keeps the last 60 s too).
+- The app reconnects with `{"type":"hello","token","resume":"<callId>","have":n}` and gets the call
+  back: `{"type":"taken",…,"seq":n,"got":m}` followed by the caller frames after `n`; it then sends
+  again its own frames after `m`. A call that ended meanwhile is answered with `released`.
+- After a server restart, whichever side comes back first waits for the other; the call continues
+  under the same `callId`. If the app misses frames that died with the old server process, the server
+  sends `{"type":"rewind","from":n}` and the extension answers `{"type":"rewound"}`, then sends
+  those frames again.
+- Both players catch up on a backlog by leaving out pauses, never speech.
+
+The extension also sends `{"type":"note","message"}` for things worth knowing after the call (Teams
+moving the call to another media connection, say); the server writes them to its log, together with
+a summary per call: frames each way, frames sent again after reconnects, and anything lost.
 
 **`/station`**, the extension's always-on link, authenticated with `BRIDGE_TOKEN`:
 the client sends `{"type":"hello","role":"station","token"}`, then `{"type":"ringing","ringId","caller"}`,
@@ -192,7 +213,7 @@ the client sends `{"type":"hello","role":"station","token"}`, then `{"type":"rin
 every 20 s. The server sends `{"type":"answer"|"decline","ringId","mode"}`.
 A `/call` hello that carries the answered `ringId` is routed to the operator who pressed Answer.
 
-**`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}`. The server
+**`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}` (plus `resume` and `have` to get its call back after a reconnect, see above). The server
 sends `{"type":"ready","iceServers":[…]}` then `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
 The client can send `{"type":"answer"|"decline","ringId"}`, `{"type":"take","callId"}`, `{"type":"mute","muted"}`,
 `{"type":"release"}`, `{"type":"stop","callId"}` (hand the bridge back) or `{"type":"end-call","callId"}`

@@ -6,7 +6,37 @@
   <title>Mock Teams Calls</title>
   <!-- Like the extension's "world: MAIN, document_start" script: loaded before any page code.
        The fake caller keeps the unpatched RTCPeerConnection so only the "Teams" side is tapped. -->
-  <script>window.__NativePC = window.RTCPeerConnection;</script>
+  <script>
+    window.__NativePC = window.RTCPeerConnection;
+    // Records what page-audio.js hands content.js: the loudness of every 20 ms audio frame (when it
+    // left the page) and any notes. Content.js's own messages to the page carry a callId; these don't.
+    window.__out = [];
+    window.__notes = [];
+    const nativePost = MessagePort.prototype.postMessage;
+    MessagePort.prototype.postMessage = function postMessage(msg, transfer) {
+      if (msg?.type === 'audio' && !msg.callId && msg.pcm) {
+        const s = new Int16Array(msg.pcm);
+        let sum = 0;
+        for (const v of s) sum += (v / 0x8000) ** 2;
+        window.__out.push({ t: performance.now(), rms: Math.sqrt(sum / s.length) });
+      } else if (msg?.type === 'note') {
+        window.__notes.push(msg.message);
+      }
+      return nativePost.call(this, msg, transfer);
+    };
+  </script>
+  <script>
+    // ?engine=tracks: page-audio.js sees its AudioContext as blocked (like an unattended Teams computer
+    // that nobody clicked), so it uses the track engine.
+    if (new URLSearchParams(location.search).get('engine') === 'tracks') {
+      const state = Object.getOwnPropertyDescriptor(BaseAudioContext.prototype, 'state');
+      Object.defineProperty(BaseAudioContext.prototype, 'state', { get() { return this.__blocked ? 'suspended' : state.get.call(this); } });
+      const NativeAC = window.AudioContext;
+      window.AudioContext = class extends NativeAC {
+        constructor(o) { super(o); if (new Error().stack.includes('page-audio.js')) this.__blocked = true; }
+      };
+    }
+  </script>
   <script src="../page-audio.js"></script>
   <style>
     :root { --bg: #f5f5f5; --fg: #242424; --card: #fff; --line: #ddd; }
@@ -95,33 +125,47 @@
     }
     // ---- Fake call: "Teams" peer (patched RTCPeerConnection) <-> caller peer (native) ----
     let call = null;
-    function tone(ctx, hz) {
+    function tone(ctx, hz, gain = new GainNode(ctx, { gain: 0.3 })) {
       const osc = new OscillatorNode(ctx, { frequency: hz });
       const dest = ctx.createMediaStreamDestination();
-      osc.connect(new GainNode(ctx, { gain: 0.3 })).connect(dest);
+      osc.connect(gain).connect(dest);
       osc.start();
       return dest.stream;
     }
-    async function startCall(caller) {
-      hangup();
-      const ctx = new AudioContext();
-      await ctx.resume();
-      const teams = new RTCPeerConnection();        // what Teams would create (tapped by page-audio.js)
-      const remote = new window.__NativePC();        // the far end of the call
+    /** A Teams connection (patched RTCPeerConnection) and the far end (native) carrying `voice`. */
+    async function connectPair(ctx, voice, mic) {
+      const teams = new RTCPeerConnection();
+      const remote = new window.__NativePC();
       teams.onicecandidate = (e) => e.candidate && remote.addIceCandidate(e.candidate);
       remote.onicecandidate = (e) => e.candidate && teams.addIceCandidate(e.candidate);
-      const mic = tone(ctx, 220);
       teams.addTrack(mic.getAudioTracks()[0], mic);
-      const voice = tone(ctx, 440);
       remote.addTrack(voice.getAudioTracks()[0], voice);
       const analyser = new AnalyserNode(ctx, { fftSize: 2048, smoothingTimeConstant: 0 });
       remote.ontrack = (e) => {
         const stream = new MediaStream([e.track]);
         const el = new Audio(); el.muted = true; el.srcObject = stream; el.play().catch(() => {});
         ctx.createMediaStreamSource(stream).connect(analyser);
-        call.el = el;
       };
       teams.ontrack = (e) => { const el = new Audio(); el.muted = true; el.srcObject = new MediaStream([e.track]); el.play().catch(() => {}); };
+      return { teams, remote, analyser };
+    }
+    async function negotiate({ teams, remote }) {
+      const offer = await teams.createOffer();
+      await teams.setLocalDescription(offer);
+      await remote.setRemoteDescription(offer);
+      const answer = await remote.createAnswer();
+      await remote.setLocalDescription(answer);
+      await teams.setRemoteDescription(answer);
+    }
+    async function startCall(caller) {
+      hangup();
+      const ctx = new AudioContext();
+      await ctx.resume();
+      const mic = tone(ctx, 220);
+      const voiceGain = new GainNode(ctx, { gain: 0.3 });
+      const voice = tone(ctx, 440, voiceGain);
+      // What Teams would create (tapped by page-audio.js), and the far end of the call.
+      const { teams, remote, analyser } = await connectPair(ctx, voice, mic);
       // Teams' in-call mic button (same data-tid and labels as Teams web).
       const micButton = document.createElement('button');
       micButton.dataset.tid = 'microphone-button';
@@ -142,32 +186,81 @@
         logEvent(`Teams mic button: ${muting ? 'muted' : 'unmuted'}`);
       };
       document.querySelector('.controls').append(micButton);
-      call = { ctx, teams, remote, analyser, micButton };
-      const offer = await teams.createOffer();
-      await teams.setLocalDescription(offer);
-      await remote.setRemoteDescription(offer);
-      const answer = await remote.createAnswer();
-      await remote.setLocalDescription(answer);
-      await teams.setRemoteDescription(answer);
+      call = { ctx, teams, remote, analyser, micButton, voice, voiceGain, mic };
+      await negotiate(call);
       logEvent(`Call connected with ${caller}`);
     }
+    /** Like Teams moving the call to another media server: a second connection carrying the same
+     * voice `delayMs` later comes up, while the first stays open until __closeOld(). */
+    window.__switchServer = async (delayMs = 120) => {
+      const { ctx, voice, mic } = call;
+      const delay = new DelayNode(ctx, { delayTime: delayMs / 1000, maxDelayTime: 1 });
+      const dest = ctx.createMediaStreamDestination();
+      ctx.createMediaStreamSource(voice).connect(delay).connect(dest);
+      const pair = await connectPair(ctx, dest.stream, mic);
+      call.next = pair;
+      await negotiate(pair);
+      logEvent(`Second connection up (same voice, ${delayMs} ms later)`);
+    };
+    /** Another participant on a connection of their own: different audio, which must be mixed in, not dropped. */
+    window.__addOtherSpeaker = async () => {
+      const { ctx, mic } = call;
+      const gain = new GainNode(ctx, { gain: 0 });
+      const other = tone(ctx, 660, gain);
+      let t = ctx.currentTime;
+      for (let i = 0; i < 60; i++) { gain.gain.setValueAtTime(i % 2 ? 0 : 0.3, t); t += i % 2 ? 0.7 : 0.35; }
+      const pair = await connectPair(ctx, other, mic);
+      call.other = pair;
+      await negotiate(pair);
+      logEvent('Other speaker connected');
+    };
+    window.__closeOld = () => {
+      call.teams.close();
+      call.remote.close();
+      Object.assign(call, { teams: call.next.teams, remote: call.next.remote, analyser: call.next.analyser });
+      logEvent('Old connection closed');
+    };
+    /** Speech-like voice: the 440 Hz tone on and off in an irregular pattern for `seconds`. */
+    window.__speak = (seconds) => {
+      const g = call.voiceGain.gain;
+      let t = call.ctx.currentTime;
+      const end = t + seconds;
+      let on = true;
+      let k = 1;
+      g.cancelScheduledValues(t);
+      while (t < end) {
+        g.setValueAtTime(on ? 0.3 : 0, t);
+        k = (k * 7919) % 104729;
+        t += on ? 0.15 + (k % 400) / 1000 : 0.1 + (k % 250) / 1000;
+        on = !on;
+      }
+      g.setValueAtTime(0.3, t);
+    };
     function hangup() {
       if (!call) return;
       call.micButton?.remove();
       call.teams.close();
       call.remote.close();
+      for (const pair of [call.next, call.other]) { pair?.teams.close(); pair?.remote.close(); }
       call.ctx.close();
       call = null;
       logEvent('Call hung up');
     }
-    /** Level (dB) of 220 Hz (local mic) and 440 Hz (caller's echo) in what the caller receives. */
-    window.__callerHears = async () => {
+    /** Peak level (dB) of 220 Hz (local mic) and 440 Hz (caller's echo) in what the caller receives over `ms`. */
+    window.__callerHears = async (ms = 300) => {
       if (!call) return null;
       await new Promise(r => setTimeout(r, 300));
       const bins = new Float32Array(call.analyser.frequencyBinCount);
-      call.analyser.getFloatFrequencyData(bins);
-      const at = (hz) => Math.round(bins[Math.round(hz / (call.ctx.sampleRate / call.analyser.fftSize))]);
-      return { mic220: at(220), echo440: at(440), state: call.teams.connectionState };
+      const at = (hz) => bins[Math.round(hz / (call.ctx.sampleRate / call.analyser.fftSize))];
+      let mic220 = -Infinity, echo440 = -Infinity;
+      for (const end = performance.now() + ms; ;) {
+        call.analyser.getFloatFrequencyData(bins);
+        mic220 = Math.max(mic220, at(220));
+        echo440 = Math.max(echo440, at(440));
+        if (performance.now() >= end) break;
+        await new Promise(r => setTimeout(r, 40));
+      }
+      return { mic220: Math.round(mic220), echo440: Math.round(echo440), state: call.teams.connectionState };
     };
     document.getElementById('hangup').onclick = hangup;
     window.__hangup = hangup;

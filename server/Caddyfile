@@ -1,0 +1,20 @@
+# HTTPS for the call bridge: several free names (and the bare IP) for the same server, so a
+# network that blocks one of them can use another. All proxy to server.js on 127.0.0.1:8080.
+{
+	admin off
+}
+
+95-216-122-142.sslip.io, 95-216-122-142.nip.io {
+	reverse_proxy 127.0.0.1:8080
+}
+
+# Let's Encrypt only issues certificates for IP addresses with its short-lived (6-day) profile;
+# Caddy renews them automatically.
+95.216.122.142 {
+	tls {
+		issuer acme {
+			profile shortlived
+		}
+	}
+	reverse_proxy 127.0.0.1:8080
+}

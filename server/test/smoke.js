@@ -37,11 +37,17 @@ const frame = (fill) => Buffer.alloc(640, fill);
 const isType = (t) => (m) => m.type === t;
 const isBinary = (m) => !!m.binary;
 
-async function main() {
+async function startServer() {
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
     env: { ...process.env, PORT: String(PORT), BRIDGE_TOKEN: TOKEN, FALLBACK: 'echo' }, stdio: ['ignore', 'pipe', 'inherit'],
   });
-  await new Promise((resolve) => server.stdout.on('data', (d) => { if (String(d).includes('bridge server')) resolve(); }));
+  server.output = '';
+  await new Promise((resolve) => server.stdout.on('data', (d) => { server.output += d; if (String(d).includes('bridge server')) resolve(); }));
+  return server;
+}
+
+async function main() {
+  let server = await startServer();
 
   try {
     const health = await (await fetch(`http://127.0.0.1:${PORT}/healthz`)).json();
@@ -87,6 +93,48 @@ async function main() {
     call.close();
     op.close();
 
+    // Every frame is numbered: a side whose connection died (even before the server noticed) says how
+    // much it has when it's back, and gets exactly the rest, in order.
+    const ext = await open('/call');
+    ext.send(JSON.stringify({ type: 'hello', token: TOKEN, callId: 'call-0010-abcd', caller: 'Ann', have: 0, sent: 0 }));
+    assert.equal((await ext.next(isType('ready'))).got, 0);
+    let me = await open('/operator');
+    me.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+    await me.next(isType('ready'));
+    me.send(JSON.stringify({ type: 'take', callId: 'call-0010-abcd' }));
+    assert.deepEqual(await me.next(isType('taken')), { type: 'taken', callId: 'call-0010-abcd', caller: 'Ann', muted: false, seq: 0, got: 0 });
+    ext.send(frame(11));
+    assert.deepEqual((await me.next(isBinary)).binary, frame(11));
+    me.terminate(); // the app's network drops
+    ext.send(frame(12));
+    await wait(100);
+    ext.send(frame(13));
+    ext.send(frame(14));
+    me = await open('/operator');
+    me.send(JSON.stringify({ type: 'hello', token: TOKEN, resume: 'call-0010-abcd', have: 1 }));
+    assert.equal((await me.next(isType('taken'))).seq, 1);
+    for (const n of [12, 13, 14]) assert.deepEqual((await me.next(isBinary)).binary, frame(n));
+    me.send(frame(21));
+    assert.deepEqual((await ext.next(isBinary)).binary, frame(21));
+    ext.terminate(); // the Teams computer's network drops
+    me.send(frame(22));
+    await wait(100);
+    me.send(frame(23));
+    const ext2 = await open('/call');
+    ext2.send(JSON.stringify({ type: 'hello', token: TOKEN, callId: 'call-0010-abcd', caller: 'Ann', have: 1, sent: 4 }));
+    assert.equal((await ext2.next(isType('ready'))).got, 4);
+    for (const n of [22, 23]) assert.deepEqual((await ext2.next(isBinary)).binary, frame(n));
+    console.log('ok  reconnects: each side gets exactly the audio it missed, in order');
+
+    ext2.send(JSON.stringify({ type: 'end', reason: 'caller hung up' }));
+    await me.next(isType('released'));
+    const late = await open('/operator');
+    late.send(JSON.stringify({ type: 'hello', token: TOKEN, resume: 'call-0010-abcd', have: 4 }));
+    assert.equal((await late.next(isType('released'))).reason, 'caller hung up');
+    late.close();
+    me.close();
+    console.log('ok  an app resuming a call that ended meanwhile is told it ended');
+
     // The extension's own bridge.js (Node has a global WebSocket, btoa and atob).
     require(path.join(__dirname, '..', '..', 'teams-auto-answer', 'bridge.js'));
     const Bridge = globalThis.TeamsCallBridge;
@@ -112,7 +160,8 @@ async function main() {
     toBridge({ type: 'start', callId: 'call-0002-abcd', caller: 'Bob Smith' });
     for (let i = 0; i < 50 && !statuses.includes('live'); i++) await wait(20);
     assert.deepEqual(statuses, ['connecting', 'live']);
-    toBridge({ type: 'audio', data: Bridge.toBase64(new Int16Array(320).fill(1234).buffer) });
+    assert.deepEqual(fromBridge.find(isType('resend')), { type: 'resend', from: 0 });
+    toBridge({ type: 'audio', seq: 1, data: Bridge.toBase64(new Int16Array(320).fill(1234).buffer) });
     for (let i = 0; i < 50 && !fromBridge.some(isType('audio')); i++) await wait(20);
     const echoed = new Int16Array(Bridge.fromBase64(fromBridge.find(isType('audio')).data));
     assert.equal(echoed.length, 320);
@@ -202,6 +251,70 @@ async function main() {
     console.log('ok  failed answer is reported; unlinking clears its rings');
     answered.close();
     app.close();
+
+    // Server restart mid-call: the extension (real bridge.js, fed like content.js feeds it: numbered
+    // frames, sent again on 'resend') and the app both reconnect, the call carries on, and nothing
+    // either side said while the server was down is lost.
+    const toPage = [];
+    const extListeners = { message: [], disconnect: [] };
+    const kept = [];
+    let posted = 0;
+    const toExt = (m) => extListeners.message.forEach(fn => fn(m));
+    const postKept = () => { for (const k of kept) if (k.seq > posted) { toExt({ type: 'audio', seq: k.seq, data: k.data }); posted = k.seq; } };
+    const speak = (n) => { kept.push({ seq: kept.length + 1, data: Bridge.toBase64(new Uint8Array(frame(n)).buffer) }); postKept(); };
+    Bridge.serveBridgePort({
+      postMessage: (m) => { if (m.type === 'resend') { posted = m.from; postKept(); } else toPage.push(m); },
+      disconnect() {},
+      onMessage: { addListener: (fn) => extListeners.message.push(fn) },
+      onDisconnect: { addListener: (fn) => extListeners.disconnect.push(fn) },
+    }, { getConfig: async () => ({ serverUrl: `${BASE}/call`, token: TOKEN }) });
+    toExt({ type: 'start', callId: 'call-0020-abcd', caller: 'Max' });
+    let desk = await open('/operator');
+    desk.send(JSON.stringify({ type: 'hello', token: TOKEN }));
+    await desk.next(m => m.type === 'calls' && m.calls.some(c => c.id === 'call-0020-abcd'));
+    desk.send(JSON.stringify({ type: 'take', callId: 'call-0020-abcd' }));
+    await desk.next(isType('taken'));
+    speak(41);
+    assert.deepEqual((await desk.next(isBinary)).binary, frame(41));
+    desk.send(frame(51));
+    for (let i = 0; i < 50 && !toPage.some(isType('audio')); i++) await wait(20);
+    assert.deepEqual(Buffer.from(Bridge.fromBase64(toPage.find(isType('audio')).data)), frame(51));
+
+    server.kill();
+    await wait(300);
+    speak(42); // said while the server is down
+    speak(43);
+    server = await startServer();
+    desk = await open('/operator');
+    desk.send(JSON.stringify({ type: 'hello', token: TOKEN, resume: 'call-0020-abcd', have: 1 }));
+    const back = await desk.next(isType('taken'), 6000);
+    assert.equal(back.callId, 'call-0020-abcd');
+    assert.equal(back.got, 1); // the app sends again everything after its first frame
+    desk.send(frame(52));
+    for (const n of [42, 43]) assert.deepEqual((await desk.next(isBinary)).binary, frame(n));
+    for (let i = 0; i < 50 && toPage.filter(isType('audio')).length < 2; i++) await wait(20);
+    assert.deepEqual(Buffer.from(Bridge.fromBase64(toPage.filter(isType('audio'))[1].data)), frame(52));
+    assert.match(server.output, /call call-002 started .*picked up again by the app that had it/);
+    console.log('ok  server restart mid-call: both sides reconnect, the call carries on, nothing is lost');
+
+    // Restarted again, but this time the extension is back first and the app is missing a frame the
+    // old server process had taken but never passed on: the extension sends it again.
+    server.kill();
+    await wait(300);
+    speak(44);
+    server = await startServer();
+    for (let i = 0; i < 100 && !/call call-002 started/.test(server.output); i++) await wait(50);
+    await wait(300);
+    desk = await open('/operator');
+    desk.send(JSON.stringify({ type: 'hello', token: TOKEN, resume: 'call-0020-abcd', have: 2 })); // never got frame 3 (43)
+    assert.equal((await desk.next(isType('taken'), 6000)).seq, 2);
+    for (const n of [43, 44]) assert.deepEqual((await desk.next(isBinary)).binary, frame(n));
+    toExt({ type: 'stop', reason: 'test done' });
+    await desk.next(isType('released'));
+    await wait(50);
+    assert.match(server.output, /call call-002 ended after \d+ s: caller -> app 4 frames .* app -> caller 2 frames .* nothing lost/);
+    desk.close();
+    console.log('ok  a frame lost with a restarted server is sent again by the extension');
   } finally {
     server.kill();
   }
