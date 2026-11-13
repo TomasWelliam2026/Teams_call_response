@@ -20,7 +20,7 @@
 // WebRTC signaling details live only in page-audio.js (page world) and console.js (operator app).
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.5.1';
+  const CLIENT = 'teams-call-answerer/0.6.0';
   const RECONNECT_FOR_MS = 60000;  // keep reconnecting this long after the connection drops mid-call (the server holds the call as long)
   const HELLO_TIMEOUT_MS = 8000;
   const STUCK_BUFFERED = 1024 * 1024; // ~30 s of audio not leaving: treat the connection as dead and reconnect

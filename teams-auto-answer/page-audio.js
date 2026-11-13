@@ -29,7 +29,7 @@
   const pcs = new Set();
   const connectedAt = new WeakMap(); // pc -> when it first reached "connected"
   let port = null;     // MessagePort to content.js
-  let options = { keepMic: false };
+  let options = {};    // { iceServers } for camera control, from the server
   let armed = null;    // { callId, timer, poll }
   let bridge = null;
 
@@ -109,10 +109,7 @@
       // Connections already live before the answer (another call or meeting still open) are only
       // used if no new one shows up; Teams may also connect the call while it is still ringing.
       preexisting: new Set(callPeers().filter(pc => Date.now() - (connectedAt.get(pc) ?? 0) > RECENT_MS)),
-      timer: setTimeout(() => {
-        disarm();
-        if (window === window.top) post({ type: 'failed', callId, reason: 'No call audio appeared within 30 s of answering.' });
-      }, ARM_TIMEOUT_MS),
+      timer: setTimeout(disarm, ARM_TIMEOUT_MS), // no call audio appeared: this frame doesn't hold the call
       poll: setInterval(tryStart, 500),
     };
     tryStart();
@@ -135,21 +132,18 @@
     disarm();
     bridge?.stop('A new call was answered.');
     try {
-      bridge = await createBridge(callId, fresh.length ? preexisting : new Set());
+      bridge = createBridge(callId, fresh.length ? preexisting : new Set());
       bridge.sync();
-      post({ type: 'started', callId, info: bridge.info() });
-    } catch (err) {
-      bridge = null;
-      post({ type: 'failed', callId, reason: err.message });
+      post({ type: 'started', callId });
+    } catch {
+      bridge = null; // this browser can't process call audio (needs Chrome or Edge 94+)
     }
   }
 
   // ---- The bridge: one answered call ------------------------------------------------------
 
-  async function createBridge(callId, ignore) {
-    // Web Audio needs a click in the page first (Chrome's autoplay rule). A call answered from the
-    // local app has none, so then the track engine takes over; it needs no click.
-    const engine = (await webAudioEngine()) || trackEngine();
+  function createBridge(callId, ignore) {
+    const engine = trackEngine();
     const toFrames = framer((pcm) => post({ type: 'audio', pcm }, [pcm]));
     // The incoming audio also clocks the outgoing (see trackEngine).
     const receiver = createReceiver((samples) => { toFrames(samples); engine.tick(); }, (message) => post({ type: 'note', message }));
@@ -158,29 +152,19 @@
     const startedAt = Date.now();
     const watch = setInterval(checkEnded, 1000);
 
-    function setOriginal(sender, track) {
-      injected.set(sender, track);
-      engine.setMic(sender, options.keepMic && track?.readyState === 'live' ? track : null);
-    }
-
     /** Swaps `transceiver`'s outgoing track for `outTrack` (defaults to the audio engine's). Kind-agnostic:
      * also used for the operator's camera (see startVideo below), which just passes a video track.
      * `settled`: the connection is up, so its direction may be changed (not while Teams is negotiating it). */
     function inject(transceiver, outTrack = engine.outTrack, settled = true) {
       const sender = transceiver.sender;
-      const firstTime = !injected.has(sender);
-      if (firstTime) {
-        // Only audio senders feed the mic-mixing engine; a video sender has nothing to mix.
-        if (outTrack.kind === 'audio') setOriginal(sender, nativeTrackGetter.call(sender));
-        else injected.set(sender, nativeTrackGetter.call(sender));
-      }
+      if (!injected.has(sender)) injected.set(sender, nativeTrackGetter.call(sender)); // Teams' own track, put back at the end
       // "recvonly" (no mic/camera on this computer, or video never negotiated) would have the sender
       // drop every packet; sendrecv lets the bridge's track actually reach the call.
       if (settled && transceiver.direction !== 'sendrecv' && transceiver.direction !== 'sendonly') {
         try { transceiver.direction = 'sendrecv'; } catch { /* transceiver stopped */ }
       }
       if (nativeTrackGetter.call(sender) === outTrack) return;
-      nativeReplaceTrack.call(sender, outTrack).catch((err) => post({ type: 'log', message: `Could not replace the ${outTrack.kind}: ${err.message}` }));
+      nativeReplaceTrack.call(sender, outTrack).catch((err) => post({ type: 'note', message: `Could not replace the ${outTrack.kind}: ${err.message}` }));
     }
 
     // ---- Camera control: the operator's camera, received over a separate WebRTC connection to the
@@ -221,7 +205,7 @@
         await vpc.setLocalDescription(answer);
         post({ type: 'video-answer', sdp: vpc.localDescription.sdp });
       } catch (err) {
-        post({ type: 'log', message: `Could not start the camera: ${err.message}` });
+        post({ type: 'note', message: `Could not start the camera: ${err.message}` });
         stopVideo('Camera offer failed.');
       }
     }
@@ -242,7 +226,7 @@
       }
       videoTransceivers.clear();
       reportVideoState();
-      if (reason) post({ type: 'log', message: reason });
+      if (reason) post({ type: 'note', message: `Camera: ${reason}` });
     }
 
     /** Picks up the call's connections, including ones Teams adds mid-call (moving to another media
@@ -293,8 +277,7 @@
       stopVideo: () => stopVideo('Stopped from the app.'),
       owns: (sender) => injected.has(sender),
       originalOf: (sender) => injected.get(sender) ?? null,
-      setOriginal,
-      info: () => ({ peers: peers.size, ...receiver.info(), senders: injected.size, video: !!operatorVideoTrack, ...engine.info }),
+      setOriginal: (sender, track) => injected.set(sender, track),
     };
     return self;
   }
@@ -501,10 +484,6 @@
     return {
       add,
       prune() { for (const track of [...sources.keys()]) if (track.readyState === 'ended') drop(track); },
-      info() {
-        const groups = new Set([...sources.values()].map(s => s.group)).size;
-        return { remoteTracks: sources.size, copies: sources.size - groups };
-      },
       close() { for (const track of [...sources.keys()]) drop(track); },
     };
   }
@@ -554,68 +533,14 @@
     return Math.sqrt(sum / f.length) < QUIET_RMS;
   }
 
-  /** Web Audio engine: server audio (+ optionally the real mic) -> mute gain -> one track. Returns
-   * null if Chrome won't run audio here yet (no click in the page). */
-  async function webAudioEngine() {
-    const ctx = new AudioContext();
-    if (ctx.state !== 'running') {
-      await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 300))]);
-      if (ctx.state !== 'running') { ctx.close(); return null; }
-    }
-    const out = ctx.createMediaStreamDestination();
-    const outGain = new GainNode(ctx, { gain: 1 });
-    outGain.connect(out);
-    const mics = new Map(); // sender -> MediaStreamAudioSourceNode
-    let nextTime = 0;
-
-    return {
-      outTrack: out.stream.getAudioTracks()[0],
-      info: { engine: 'webaudio', sampleRate: ctx.sampleRate },
-      setMic(sender, track) {
-        mics.get(sender)?.disconnect();
-        mics.delete(sender);
-        if (!track) return;
-        const mic = ctx.createMediaStreamSource(new MediaStream([track]));
-        mic.connect(outGain);
-        mics.set(sender, mic);
-      },
-      play(pcm) {
-        const f = toFloat(pcm);
-        if (!f.length) return;
-        const now = ctx.currentTime;
-        if (nextTime < now + 0.01) nextTime = now + START_BUFFER_S;
-        const ahead = nextTime - now;
-        // Behind after a hiccup or a reconnect: catch up by leaving out pauses, never speech.
-        if ((ahead > CATCHUP_S && isQuiet(f)) || ahead > MAX_BACKLOG_S) return;
-        const buf = ctx.createBuffer(1, f.length, RATE);
-        buf.copyToChannel(f, 0);
-        const src = new AudioBufferSourceNode(ctx, { buffer: buf });
-        src.connect(outGain);
-        src.start(nextTime);
-        nextTime += buf.duration;
-      },
-      tick() {},
-      setMuted(muted) {
-        outGain.gain.setValueAtTime(muted ? 0 : 1, ctx.currentTime);
-      },
-      close() {
-        for (const m of mics.values()) m.disconnect();
-        out.stream.getAudioTracks()[0].stop();
-        ctx.close();
-      },
-    };
-  }
-
   /**
-   * Track engine: MediaStreamTrackGenerator makes the outgoing track. Unlike Web Audio it runs without
-   * a click in the page, so it works on an unattended Teams computer. The server's audio goes out on
-   * a steady 20 ms clock (ticked by the call's incoming audio, a timer as backup), so network jitter
-   * doesn't reach the caller; silence fills any gap. "Also send my microphone" isn't mixed in this mode.
+   * The outgoing track, made with MediaStreamTrackGenerator: it needs no click in the page (unlike
+   * Web Audio), so it works on an unattended Teams computer. The server's audio goes out on a steady
+   * 20 ms clock (ticked by the call's incoming audio, a timer as backup), so network jitter doesn't
+   * reach the caller; silence fills any gap.
    */
   function trackEngine() {
-    if (!window.MediaStreamTrackGenerator) {
-      throw new Error('The browser blocked audio processing on this page. Click anywhere in Teams once, then answer again.');
-    }
+    if (!window.MediaStreamTrackGenerator) throw new Error('This browser cannot make an audio track here.');
     const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
     const writer = generator.writable.getWriter();
     const queue = playout();
@@ -624,7 +549,6 @@
     let startedAt = 0;
     let written = 0;   // frames
     let timestamp = 0; // µs, must only grow
-    if (options.keepMic) post({ type: 'log', message: 'Answered without a click on the Teams computer: "Also send my microphone" is off for this call.' });
 
     function write(f) {
       const data = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfFrames: f.length, numberOfChannels: 1, timestamp, data: f });
@@ -646,8 +570,6 @@
 
     return {
       outTrack: generator,
-      info: { engine: 'tracks' },
-      setMic() {},
       play(pcm) { queue.push(toFloat(pcm)); },
       tick,
       setMuted(value) { muted = value; },
