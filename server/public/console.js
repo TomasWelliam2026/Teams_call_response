@@ -5,7 +5,11 @@
 const RATE = 16000;
 const FRAME = 320;
 const START_BUFFER_S = 0.25; // over two WAN hops (Teams computer -> server -> here), 80 ms was too thin and caused cutouts
-const MAX_AHEAD_S = 1.2;
+const CATCHUP_S = 0.6;       // more of the caller waiting than this (after a hiccup or reconnect): leave out pauses to catch up
+const MAX_BACKLOG_S = 20;    // only beyond this much waiting is audio with speech in it dropped
+const QUIET_RMS = 0.004;     // a 20 ms frame quieter than this is a pause
+const KEEP_FRAMES = 3000;    // the last 60 s of this microphone, to send again whatever didn't reach the server
+const RESUME_FOR_MS = 60000; // a call survives the connection being down this long (the server holds it as long)
 const TOKEN_KEY = 'callBridge.operatorToken';
 const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 
@@ -17,6 +21,13 @@ let retry = 0;
 let retryTimer = null;
 let audio = null;   // { ctx, stream, nextTime } while on a call
 let active = null;  // { callId, caller, since }
+// The call's audio is numbered both ways, so a reconnect picks up exactly where it left off:
+let linked = false; // the server has (again) confirmed this app has the active call
+let lostAt = 0;     // when the connection dropped during a call
+let have = 0;       // caller frames received in this call
+let produced = 0;   // microphone frames made in this call
+let sentUpTo = 0;   // the last microphone frame sent
+let kept = [];      // [{ seq, pcm }], the last KEEP_FRAMES microphone frames
 let answering = null; // ringId we pressed Answer on, until the call arrives
 let muted = false;
 let clock = null;
@@ -81,43 +92,92 @@ function connect() {
   if (ws) { ws.onclose = null; ws.close(); }
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/operator`);
   ws.binaryType = 'arraybuffer';
-  setStatus(retry ? 'Reconnecting…' : 'Connecting…');
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token }));
+  setStatus(active ? 'Connection lost — reconnecting. Your call is kept and its audio will catch up.' : retry ? 'Reconnecting…' : 'Connecting…');
+  // On a call, ask for it back and say how much of the caller's audio arrived; the server sends the rest.
+  ws.onopen = () => ws.send(JSON.stringify(active ? { type: 'hello', token, resume: active.callId, have } : { type: 'hello', token }));
   ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') { play(e.data); return; }
+    if (typeof e.data !== 'string') {
+      if (active && linked) { have++; play(e.data); }
+      return;
+    }
     const msg = JSON.parse(e.data);
     switch (msg.type) {
       case 'ready':
         retry = 0;
         iceServers = msg.iceServers || [];
-        setStatus('Connected. Waiting for calls.');
+        if (!active) setStatus('Connected. Waiting for calls.');
         $('login').hidden = true;
         $('main').hidden = false;
         break;
       case 'calls': render(msg); break;
-      case 'taken': answering = null; startCall(msg.callId, msg.caller, !!msg.muted); break;
+      case 'taken':
+        answering = null;
+        if (active?.callId === msg.callId) resumed(msg);
+        else startCall(msg.callId, msg.caller, !!msg.muted, msg);
+        break;
       case 'mute-state': if (active?.callId === msg.callId) setMuted(msg.muted); break;
-      case 'released': endCall(`Call ended: ${msg.reason.replace(/\.$/, '')}.`); break;
+      case 'released': if (!active || active.callId === msg.callId) endCall(`Call ended: ${msg.reason.replace(/\.$/, '')}.`); break;
       case 'error': answering = null; setStatus(msg.message); renderRings(); break;
       case 'video-answer': camera?.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp }).catch(() => {}); break;
       case 'video-ice': if (msg.candidate) camera?.pc.addIceCandidate(msg.candidate).catch(() => {}); break;
     }
   };
   ws.onclose = (e) => {
-    endCall();
+    linked = false;
     updateRinging([]);
     if (e.code === 4001) {
+      endCall();
       wantConnected = false;
       storage.set('');
       showLogin('Wrong operator token.');
       return;
     }
-    if (!wantConnected) { showLogin('Signed out.'); return; }
+    // Another Call Bridge window picked this call up: it's that window's now.
+    if (e.code === 4003) endCall('This call continued in another Call Bridge window.');
+    if (!wantConnected) { endCall(); showLogin('Signed out.'); return; }
+    if (active) {
+      // Network blip or server restart mid-call: keep the call, its sound and the microphone going and
+      // reconnect fast; the server holds the call and both sides catch up on what they missed.
+      lostAt ||= Date.now();
+      if (Date.now() - lostAt > RESUME_FOR_MS) {
+        endCall('Call ended: the connection to the server was down for over a minute.');
+      } else {
+        retryTimer = setTimeout(connect, Math.min(2000, 250 * 2 ** retry++));
+        setStatus('Connection lost — reconnecting. Your call is kept and its audio will catch up.');
+        return;
+      }
+    }
     // Network blip, server restart, laptop asleep: keep trying, the server stays up.
     const delay = Math.min(15000, 1000 * 2 ** retry++);
     setStatus(`Connection lost. Reconnecting in ${Math.round(delay / 1000)} s…`);
     retryTimer = setTimeout(connect, delay);
   };
+}
+
+/** The server gave this app its call back after a reconnect: send it the microphone audio it missed. */
+function resumed(msg) {
+  lostAt = 0;
+  linked = true;
+  have = msg.seq;
+  sentUpTo = Math.min(msg.got, produced);
+  setMuted(msg.muted ?? muted);
+  sendMic();
+}
+
+function keepMic(pcm) {
+  kept.push({ seq: ++produced, pcm });
+  if (kept.length > KEEP_FRAMES) kept.shift();
+  sendMic();
+}
+
+/** Sends every kept microphone frame after `sentUpTo`, in order, while the call is linked. */
+function sendMic() {
+  if (!linked || ws?.readyState !== WebSocket.OPEN || !kept.length) return;
+  sentUpTo = Math.max(sentUpTo, kept[0].seq - 1); // older ones are gone (over a minute offline)
+  for (let i = sentUpTo + 1 - kept[0].seq; i < kept.length; i++) {
+    ws.send(kept[i].pcm);
+    sentUpTo = kept[i].seq;
+  }
 }
 
 function signIn(newToken, remember) {
@@ -254,31 +314,36 @@ function updateRinging(next) {
 
 // ---- Call audio -------------------------------------------------------------------------------
 
-async function startCall(callId, caller, startMuted = false) {
+async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 } = {}) {
   endCall();
   active = { callId, caller, since: Date.now() };
+  linked = true;
+  have = seq;
+  produced = sentUpTo = got; // this microphone's frames are numbered on from what the call already has
   setMuted(startMuted);
   updateRinging(rings);
   $('active').hidden = false;
   $('activeCaller').textContent = caller;
   tick();
+  // Sound first, so the caller's first words play while the microphone is still being opened.
+  const ctx = new AudioContext();
+  const mine = audio = { ctx, stream: null, nextTime: 0 };
+  ctx.resume().catch(() => {});
   try {
     const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
-    const ctx = new AudioContext();
-    await ctx.resume();
+    if (audio !== mine) { stream.getTracks().forEach(t => t.stop()); return; } // the call ended meanwhile
+    mine.stream = stream;
     const src = ctx.createMediaStreamSource(stream);
     const lowpass = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
-    const tap = ctx.createScriptProcessor(1024, 1, 1);
-    const toPcm = downsampler(ctx.sampleRate, (pcm) => { if (!muted && ws?.readyState === WebSocket.OPEN) ws.send(pcm); });
-    tap.onaudioprocess = (e) => toPcm(e.inputBuffer.getChannelData(0));
+    // Captured on the audio thread (AudioWorklet), so a busy or background window doesn't drop any of it.
+    await ctx.audioWorklet.addModule('capture-worklet.js');
+    const tap = new AudioWorkletNode(ctx, 'capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+    const toPcm = downsampler(ctx.sampleRate, (pcm) => { if (!muted && audio === mine) keepMic(pcm); });
+    tap.port.onmessage = (e) => toPcm(e.data);
     src.connect(lowpass).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
-    audio = { ctx, stream, nextTime: 0 };
-    setMuted(muted); // shows "Talking to …" or "Muted …"
+    if (audio === mine) setMuted(muted); // shows "Talking to …" or "Muted …"
   } catch (err) {
-    setStatus(`${micProblem(err)} You can still listen.`);
-    const ctx = new AudioContext();
-    await ctx.resume();
-    audio = { ctx, stream: null, nextTime: 0 };
+    if (audio === mine) setStatus(`${micProblem(err)} You can still listen.`);
   }
 }
 
@@ -291,6 +356,9 @@ function endCall(message) {
   stopCamera(false);
   const wasActive = !!active;
   active = null;
+  linked = false;
+  lostAt = 0;
+  kept = [];
   setMuted(false); // the next call starts unmuted unless the Teams computer says otherwise
   clearTimeout(clock);
   $('active').hidden = true;
@@ -361,11 +429,19 @@ function play(pcm) {
   for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 0x8000;
   const now = ctx.currentTime;
   if (audio.nextTime < now + 0.01) audio.nextTime = now + START_BUFFER_S;
-  if (audio.nextTime > now + MAX_AHEAD_S) return;
+  const ahead = audio.nextTime - now;
+  // Behind after a hiccup or a reconnect: catch up by leaving out pauses, never the caller's words.
+  if ((ahead > CATCHUP_S && rms(ch) < QUIET_RMS) || ahead > MAX_BACKLOG_S) return;
   const src = new AudioBufferSourceNode(ctx, { buffer: buf });
   src.connect(ctx.destination);
   src.start(audio.nextTime);
   audio.nextTime += buf.duration;
+}
+
+function rms(f) {
+  let sum = 0;
+  for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+  return Math.sqrt(sum / f.length);
 }
 
 /** Float32 at `fromRate` -> 20 ms Int16 frames at 16 kHz (input already low-passed). */

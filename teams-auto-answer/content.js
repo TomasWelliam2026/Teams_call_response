@@ -91,14 +91,44 @@
   let armRequestedAt = 0; // last time *this* frame asked the background worker to arm, any reason
   const callers = new Map(); // callId -> { caller, ringId }, from the arm message
 
+  // The caller's audio of the current call, numbered, with the last minute of it kept: whatever didn't
+  // reach the server (connection dropped, background worker restarted) is sent again from here.
+  const KEEP_FRAMES = 3000;   // 60 s of 20 ms frames
+  const REOPEN_FOR_MS = 60000;
+  let kept = [];              // [{ seq, data: base64 }]
+  let produced = 0;           // frames the page has handed us in this call
+  let posted = 0;             // the last frame posted to the background worker
+  let received = 0;           // the app's frames delivered to the page in this call
+  let reopenSince = 0;        // set while the link to the background worker is being reopened
+
   function pushPageConfig() {
-    pagePort.postMessage({ type: 'config', options: { keepMic: !!settings.bridgeKeepMic, workletUrl: chrome.runtime.getURL('tap-worklet.js') } });
+    pagePort.postMessage({ type: 'config', options: { keepMic: !!settings.bridgeKeepMic } });
   }
 
   function closeBridgePort() {
     try { bridgePort?.disconnect(); } catch { /* already gone */ }
     bridgePort = null;
     bridgeCallId = null;
+  }
+
+  function keepFrame(pcm) {
+    kept.push({ seq: ++produced, data: B.toBase64(pcm) });
+    if (kept.length > KEEP_FRAMES) kept.shift();
+    postFrames();
+  }
+
+  /** Posts every kept frame after `posted`, in order. */
+  function postFrames() {
+    if (!bridgePort || !kept.length) return;
+    if (posted + 1 < kept[0].seq) {
+      const gone = kept[0].seq - 1 - posted;
+      bridgePort.postMessage({ type: 'note', message: `${(gone / 50).toFixed(1)} s of the caller's audio was too old to send again` });
+      posted = kept[0].seq - 1;
+    }
+    for (let i = posted + 1 - kept[0].seq; i < kept.length; i++) {
+      bridgePort.postMessage({ type: 'audio', seq: kept[i].seq, data: kept[i].data });
+      posted = kept[i].seq;
+    }
   }
 
   // ---- Mute, shared between the local app and Teams ----------------------------------------
@@ -235,11 +265,32 @@
     teamsChangedAt = 0;
     reportedMute = null;
     weEnabledCamera = false;
-    bridgePort = chrome.runtime.connect({ name: 'bridge' });
+    kept = [];
+    produced = posted = received = 0;
+    reopenSince = 0;
+    connectBridge(callId);
+  }
+
+  /** (Re)opens the link to the background worker, which holds the connection to the server. */
+  function connectBridge(callId) {
+    try {
+      bridgePort = chrome.runtime.connect({ name: 'bridge' });
+    } catch { // the extension was reloaded: this copy of the script can't reach it any more
+      pagePort.postMessage({ type: 'stop', callId, reason: 'The extension was reloaded.' });
+      bridgePort = null;
+      bridgeCallId = null;
+      return;
+    }
     bridgePort.onMessage.addListener((msg) => {
       if (msg.type === 'audio') {
+        received++;
         const pcm = B.fromBase64(msg.data);
         pagePort.postMessage({ type: 'audio', callId, pcm }, [pcm]);
+      } else if (msg.type === 'resend') {
+        posted = Math.min(msg.from, produced); // the server has frames up to here: send the rest again
+        postFrames();
+      } else if (msg.type === 'connected') {
+        reopenSince = 0;
       } else if (msg.type === 'mute') {
         appSetMute(!!msg.muted);
       } else if (msg.type === 'stop') {
@@ -254,14 +305,22 @@
         hangupButton()?.click();
       }
     });
-    // Server unreachable or worker gone: hand the microphone back to Teams.
+    // A deliberate end arrives as 'stop' first (bridgeCallId is cleared then). Without one, the
+    // background worker went away (Chrome restarts it now and then): reopen and carry on with the
+    // same call, keeping the bridge in the page running meanwhile. Give up after a minute.
     bridgePort.onDisconnect.addListener(() => {
       if (bridgeCallId !== callId) return;
-      pagePort.postMessage({ type: 'stop', callId, reason: 'Bridge closed.' });
       bridgePort = null;
-      bridgeCallId = null;
+      reopenSince ||= Date.now();
+      if (Date.now() - reopenSince > REOPEN_FOR_MS) {
+        pagePort.postMessage({ type: 'stop', callId, reason: 'Bridge closed.' });
+        bridgeCallId = null;
+        return;
+      }
+      setTimeout(() => { if (bridgeCallId === callId && !bridgePort) connectBridge(callId); }, 500);
     });
-    bridgePort.postMessage({ type: 'start', callId, ...callers.get(callId) });
+    bridgePort.postMessage({ type: 'start', callId, ...callers.get(callId), have: received, sent: posted });
+    reportedMute = null;
     syncMute(); // tell the app whether Teams is muted right now
   }
 
@@ -272,7 +331,12 @@
         send({ type: 'bridge-event', event: 'started', callId: data.callId, detail: data.info });
         break;
       case 'audio':
-        if (bridgePort) bridgePort.postMessage({ type: 'audio', data: B.toBase64(data.pcm) });
+        if (bridgeCallId) keepFrame(data.pcm);
+        break;
+      case 'note':
+        // Worth seeing after the call (e.g. Teams switched media connections): the side panel and the server log.
+        send({ type: 'bridge-event', event: 'log', detail: data.message });
+        bridgePort?.postMessage({ type: 'note', message: data.message });
         break;
       case 'stopped':
         if (bridgeCallId === data.callId) {

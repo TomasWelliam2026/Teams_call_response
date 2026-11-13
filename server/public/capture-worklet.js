@@ -1,9 +1,9 @@
-// AudioWorklet for page-audio.js: batches the call's mixed audio into 20 ms chunks off the main
-// thread. Loaded from the extension (web_accessible_resources) because Teams' CSP blocks blob: modules.
-registerProcessor('tca-tap', class extends AudioWorkletProcessor {
-  constructor(options) {
+// AudioWorklet for console.js: hands the microphone to the page in ~20 ms batches from the audio
+// thread, so a busy or background window delays the batches but never loses any.
+registerProcessor('capture', class extends AudioWorkletProcessor {
+  constructor() {
     super();
-    this.size = options.processorOptions.size;
+    this.size = Math.round(sampleRate / 50);
     this.buf = new Float32Array(this.size);
     this.n = 0;
   }
