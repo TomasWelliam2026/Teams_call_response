@@ -11,7 +11,7 @@ const QUIET_RMS = 0.004;     // a 20 ms frame quieter than this is a pause
 const KEEP_FRAMES = 3000;    // the last 60 s of this microphone, to send again whatever didn't reach the server
 const RESUME_FOR_MS = 60000; // a call survives the connection being down this long (the server holds it as long)
 const TOKEN_KEY = 'callBridge.operatorToken';
-const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+const NOISE_KEY = 'callBridge.noiseFilter'; // 'off' after the user turned the noise filter off
 
 const $ = (id) => document.getElementById(id);
 let ws = null;
@@ -19,7 +19,7 @@ let token = '';
 let wantConnected = false; // false after Sign out or a rejected token: don't reconnect
 let retry = 0;
 let retryTimer = null;
-let audio = null;   // { ctx, stream, nextTime } while on a call
+let audio = null;   // { ctx, stream, nextTime, tap, denoiser } while on a call
 let active = null;  // { callId, caller, since }
 // The call's audio is numbered both ways, so a reconnect picks up exactly where it left off:
 let linked = false; // the server has (again) confirmed this app has the active call
@@ -47,11 +47,36 @@ function setMuted(value) {
 }
 
 const storage = {
-  get() { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } },
-  set(v) { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ } },
+  get(key = TOKEN_KEY) { try { return localStorage.getItem(key) || ''; } catch { return ''; } },
+  set(v, key = TOKEN_KEY) { try { v ? localStorage.setItem(key, v) : localStorage.removeItem(key); } catch { /* private mode */ } },
 };
 
 // ---- Microphone -------------------------------------------------------------------------------
+
+// Noise filter: RNNoise (rnnoise.wasm) runs in capture-worklet.js and removes background noise, and
+// a gate there silences everything between words. Chrome's own noise suppression is off meanwhile,
+// since it only smears what RNNoise gets to work with; it comes back on whenever the filter isn't running.
+let noiseFilter = storage.get(NOISE_KEY) !== 'off';
+let rnnoise = null; // Promise of rnnoise.wasm's bytes, or of null if it couldn't be fetched
+
+function micConstraints(filtering) {
+  return { audio: { echoCancellation: true, noiseSuppression: !filtering, autoGainControl: true } };
+}
+
+function rnnoiseBytes() {
+  rnnoise ??= fetch('rnnoise.wasm').then((r) => (r.ok ? r.arrayBuffer() : null)).catch(() => null)
+    .then((bytes) => { if (!bytes) rnnoise = null; return bytes; }); // try again on the next call
+  return rnnoise;
+}
+
+/** Applies the switch to the call in progress; says when the filter can't run. */
+function applyNoiseFilter() {
+  const filtering = noiseFilter && !!audio?.denoiser;
+  if (audio?.tap) audio.tap.port.postMessage({ denoise: noiseFilter });
+  audio?.stream?.getAudioTracks().forEach((t) => t.applyConstraints(micConstraints(filtering).audio).catch(() => {}));
+  $('noiseNote').textContent = noiseFilter && audio?.denoiser === false
+    ? "Unavailable on this computer, so Chrome's lighter noise suppression is used instead." : '';
+}
 
 /** Plain-language reason a microphone can't be used, from a getUserMedia error. */
 function micProblem(err) {
@@ -73,8 +98,9 @@ function micProblem(err) {
 
 /** Asks for the microphone once (so Chrome shows its prompt now, not mid-call) and reports the result. */
 async function checkMic() {
+  rnnoiseBytes(); // fetched now, so a call doesn't wait for it
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(false));
     const label = stream.getAudioTracks()[0]?.label || 'default microphone';
     stream.getTracks().forEach(t => t.stop());
     $('mic').textContent = `Microphone ready: ${label}`;
@@ -326,20 +352,32 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
   $('activeCaller').textContent = caller;
   tick();
   // Sound first, so the caller's first words play while the microphone is still being opened.
-  const ctx = new AudioContext();
-  const mine = audio = { ctx, stream: null, nextTime: 0 };
+  // 48 kHz is what the noise filter works at; Chrome converts the microphone to it if needed.
+  const ctx = new AudioContext({ sampleRate: 48000 });
+  const mine = audio = { ctx, stream: null, nextTime: 0, tap: null, denoiser: null };
   ctx.resume().catch(() => {});
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+    const wasm = await rnnoiseBytes();
+    if (!wasm) mine.denoiser = false;
+    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(noiseFilter && !!wasm));
     if (audio !== mine) { stream.getTracks().forEach(t => t.stop()); return; } // the call ended meanwhile
     mine.stream = stream;
     const src = ctx.createMediaStreamSource(stream);
     const lowpass = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
     // Captured on the audio thread (AudioWorklet), so a busy or background window doesn't drop any of it.
     await ctx.audioWorklet.addModule('capture-worklet.js');
-    const tap = new AudioWorkletNode(ctx, 'capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+    const tap = mine.tap = new AudioWorkletNode(ctx, 'capture', {
+      numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit',
+      processorOptions: { denoise: noiseFilter, rnnoise: wasm },
+    });
     const toPcm = downsampler(ctx.sampleRate, (pcm) => { if (!muted && audio === mine) keepMic(pcm); });
-    tap.port.onmessage = (e) => toPcm(e.data);
+    tap.port.onmessage = (e) => {
+      if (e.data instanceof Float32Array) { toPcm(e.data); return; }
+      mine.denoiser = e.data.denoiser; // the worklet's one report: did RNNoise load?
+      if (!e.data.denoiser) console.warn('Noise filter unavailable:', e.data.error);
+      if (audio === mine) applyNoiseFilter();
+    };
+    if (!wasm) applyNoiseFilter(); // no report comes then
     src.connect(lowpass).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
     if (audio === mine) setMuted(muted); // shows "Talking to …" or "Muted …"
   } catch (err) {
@@ -485,6 +523,12 @@ $('mute').addEventListener('click', () => {
   const next = !muted;
   setMuted(next);
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute', muted: next }));
+});
+$('noiseFilter').checked = noiseFilter;
+$('noiseFilter').addEventListener('change', () => {
+  noiseFilter = $('noiseFilter').checked;
+  storage.set(noiseFilter ? '' : 'off', NOISE_KEY);
+  applyNoiseFilter();
 });
 $('release').addEventListener('click', () => ws.send(JSON.stringify({ type: 'release' })));
 $('camera').addEventListener('click', () => (camera ? stopCamera() : startCamera()));

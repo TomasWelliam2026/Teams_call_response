@@ -1,24 +1,26 @@
 <#
   Undoes install.ps1: stops and removes the three startup tasks and the firewall rules.
-  Leaves server\.env (your tokens), logs and the certificate cache in place; delete them by hand if you want.
-  Run in an elevated PowerShell.
+  Leaves server\.env (your tokens), logs, the certificate cache and bin\ in place; delete the folder
+  by hand if you want it all gone. Asks for administrator rights if it doesn't have them.
 #>
 $ErrorActionPreference = 'Stop'
-foreach ($name in 'CallBridge Server', 'CallBridge HTTPS', 'CallBridge TURN') {
+. "$PSScriptRoot\common.ps1"
+if (-not (Test-Admin)) {
+  Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -NoExit -File `"$PSCommandPath`""
+  return
+}
+foreach ($name in $TaskNames) {
   if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $name -Confirm:$false
     Write-Host "Removed task '$name'."
   }
 }
-# cmd.exe ends with the task, but node/caddy children can outlive it.
-Get-CimInstance Win32_Process | Where-Object {
-  ($_.Name -eq 'node.exe' -and ($_.CommandLine -like '*--env-file=.env server.js*' -or $_.CommandLine -like '*--env-file=.env turn-server.js*')) -or
-  ($_.Name -eq 'caddy.exe' -and $_.CommandLine -like '*reverse-proxy*')
-} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; Write-Host "Stopped $($_.Name) ($($_.ProcessId))." }
+Stop-BridgeProcesses
 foreach ($name in 'CallBridge HTTPS', 'CallBridge TURN') {
   if (Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue) {
     Remove-NetFirewallRule -DisplayName $name
     Write-Host "Removed firewall rule '$name'."
   }
 }
+Write-Host "Uninstalled. Your tokens are still in $EnvFile."

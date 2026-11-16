@@ -56,6 +56,8 @@ BRIDGE_TOKEN=<random secret, 16+ chars> npm start
 | `FALLBACK` | `silence` | `silence` or `echo` for calls no operator has taken |
 | `TURN_PORT` | `3478` | UDP port for the camera-control TURN relay (`turn-server.js`); must match on both |
 | `TURN_MIN_PORT` / `TURN_MAX_PORT` | `49152` / `49452` | UDP port range TURN uses to relay media |
+| `PUBLIC_IP` | (none) | This server's public IPv4. `turn-server.js` hands it out as the relay address, which matters behind NAT. Setup fills it in. |
+| `DOMAIN` | (none) | Your own domain, if any. Only setup reads it, to write the Caddyfile. |
 
 Generate a token with `node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))"`.
 
@@ -66,52 +68,71 @@ BRIDGE_TOKEN=<same secret> node turn-server.js
 ```
 
 It's a separate process from `server.js` by design — a crash or restart on either side doesn't affect
-the other. `install.ps1` below sets it up as its own startup task automatically; running it elsewhere,
-start it the same way you start `server.js` and open UDP 3478 and 49152-49452 on it.
+the other. Setup (below) runs it as its own service; running it elsewhere, start it the same way you
+start `server.js` and open UDP 3478 and 49152-49452 on it.
 
-## Deploy on a Windows VPS (always on, HTTPS, no domain needed)
+## Install on a VPS (Windows or Linux)
 
-1. Put `caddy.exe` (Windows amd64, from https://github.com/caddyserver/caddy/releases) in `server\bin\`.
-2. Open PowerShell with **Run as administrator** and run:
+One setup per system does everything: it gets Node.js and Caddy if they're missing (checksum-verified
+downloads), creates the tokens, sets up HTTPS with free Let's Encrypt certificates (no domain needed),
+opens the firewall, and runs the server, the HTTPS front and the TURN relay as services that start at
+boot and restart if they stop. It ends by checking the server answers and printing the addresses.
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File server\deploy\windows\install.ps1
-   ```
+**Get the server onto the VPS:** copy `dist/call-bridge-server.zip` (Windows) or
+`dist/call-bridge-server.tar.gz` (Linux) there and unpack it, or clone this repository. The package
+already holds the npm packages and no secrets; rebuild it with `npm run package` in `server/`.
 
-   The script creates `server\.env` with two new secrets, opens TCP 80 and 443 plus UDP 3478 and
-   49152-49452 in Windows Firewall, and registers three startup tasks running as SYSTEM:
-   **CallBridge Server** (Node, only on 127.0.0.1), **CallBridge HTTPS** (Caddy with a free Let's
-   Encrypt certificate) and **CallBridge TURN** (`turn-server.js`, the camera-control relay). It then
-   checks the site. All three tasks restart if they stop and come back after a reboot.
-   The address is `https://<your-ip-with-dashes>.sslip.io` unless you pass `-Domain your.domain`.
-3. If your provider also has a network firewall (for example Hetzner Cloud Firewall), allow inbound
-   TCP 80 and 443, and UDP 3478 and 49152-49452 (camera control), there too.
-4. Set up the extension and the app with the server URL and tokens (see below).
+| | Windows Server 2016+ | Linux with systemd (Ubuntu, Debian, Rocky, Alma, Fedora, ...) |
+|---|---|---|
+| Run setup | Double-click **`setup.cmd`** (asks for administrator rights) | `sudo bash setup.sh` |
+| Installs to | Where you unpacked it (tasks run as SYSTEM) | `/opt/call-bridge` (`--dir` to change), runs as user `callbridge` |
+| Status and live log | `monitor.bat` | `callbridge status`, `callbridge logs` |
+| Start / restart | `start.bat` | `sudo callbridge start` / `restart` |
+| Tokens | `.env` in the folder (administrators only) | `sudo callbridge tokens` |
+| Uninstall | `uninstall.bat` (keeps `.env`) | `sudo callbridge uninstall` (keeps `.env`; `--purge` deletes all) |
+
+Options, the same on both (Windows spelling first):
+
+| Option | Meaning |
+|---|---|
+| `-Domain` / `--domain bridge.example.com` | Also answer on your own domain. Point its DNS A record at the VPS first. Remembered; `none` drops it. |
+| `-PublicIp` / `--ip 1.2.3.4` | Use this IP instead of the one detected. |
+| `-Port` / `--port 8080` | Local port of `server.js` (only Caddy talks to it). |
+| `-Force` / `--yes` | Don't ask before restarting a server that has live calls. |
+
+For example `setup.cmd -Domain bridge.example.com` or `sudo bash setup.sh --domain bridge.example.com`.
+
+If your provider also has a network firewall (AWS security group, Hetzner Cloud Firewall, ...), allow
+inbound TCP 80 and 443, and UDP 3478 and 49152-49452 (camera control), there too. Setup can't reach
+that one. Ports 80 and 443 must be free: setup warns if IIS, nginx or apache already holds them.
 
 ### Server URL and tokens
 
+Setup prints every address the server answers on. They all reach the same server; use whichever one
+your networks allow (some web filters block `sslip.io`, for example):
+
+| Address | Example |
+|---|---|
+| Your domain (with `-Domain`) | `bridge.example.com` |
+| `<ip-with-dashes>.sslip.io` | `95-216-122-142.sslip.io` |
+| `<ip-with-dashes>.nip.io` | `95-216-122-142.nip.io` |
+| The bare IP | `95.216.122.142` (Let's Encrypt's 6-day certificates, renewed automatically) |
+
 | Where | Server URL | Token |
 |---|---|---|
-| **Extension** side panel (Teams computer) | `wss://<domain>/call` | **Access token** = `BRIDGE_TOKEN` |
-| **Call Bridge app** (your own computer, in Chrome) | open `https://<domain>/` | **Operator token** = `OPERATOR_TOKEN` |
+| **Extension** side panel (Teams computer) | `wss://<address>/call` | **Access token** = `BRIDGE_TOKEN` |
+| **Call Bridge app** (your own computer, in Chrome) | open `https://<address>/` | **Operator token** = `OPERATOR_TOKEN` |
 
-`<domain>` is what `install.ps1` printed, for example `95-216-122-142.sslip.io`.
-It only changes if the server moves to another IP or you pass `-Domain`.
-
-Both tokens are in `server\.env`. Only administrators can read that file. To get a token without showing it
-on screen, run one of these in **PowerShell → Run as administrator** on the VPS, then paste it with Ctrl+V.
-Remote Desktop shares the clipboard with your own computer.
+Both tokens are in `.env` in the server folder, readable only by administrators (root on Linux). On
+Windows, to get a token without showing it on screen, run one of these in **PowerShell → Run as
+administrator** in the server folder, then paste it with Ctrl+V (Remote Desktop shares the clipboard):
 
 ```powershell
 # Extension token
-(Get-Content server\.env | Where-Object { $_ -like 'BRIDGE_TOKEN=*' }) -replace '^BRIDGE_TOKEN=', '' | Set-Clipboard
+(Get-Content .env | Where-Object { $_ -like 'BRIDGE_TOKEN=*' }) -replace '^BRIDGE_TOKEN=', '' | Set-Clipboard
 # App token
-(Get-Content server\.env | Where-Object { $_ -like 'OPERATOR_TOKEN=*' }) -replace '^OPERATOR_TOKEN=', '' | Set-Clipboard
+(Get-Content .env | Where-Object { $_ -like 'OPERATOR_TOKEN=*' }) -replace '^OPERATOR_TOKEN=', '' | Set-Clipboard
 ```
-
-Run them from the repository folder, or put the full path to `server\.env` in place of `server\.env`.
-Or open `server\.env` in Notepad started with **Run as administrator** (File → Open, file type **All Files**)
-and copy the part after `=`.
 
 For the extension you can skip typing. Put a `bridge-config.json` with the URL and `BRIDGE_TOKEN` next to its
 `manifest.json` (see the extension README), and it fills both fields in when it's loaded or reloaded.
@@ -120,24 +141,36 @@ For the extension you can skip typing. Put a `bridge-config.json` with the URL a
 - **`dist\teams-call-answerer-extension.zip`**: no token, safe to share or commit. Enter the URL and token in the panel.
 - **`dist\private\teams-call-answerer-extension-with-token.zip`**: includes `bridge-config.json`. It's git-ignored; never commit or share it.
 
-Treat both tokens like passwords. To change them, delete `server\.env`, run `install.ps1` again, and enter
-the new tokens in the extension and the app.
+Treat both tokens like passwords. To change them, delete `.env`, run setup again, and enter the new
+tokens in the extension and the app.
 
-The server has no window of its own; it runs invisibly in the background. To see it, double-click
-`server\monitor.bat`. It shows whether all three tasks run, how many Teams computers and Call Bridge
-apps are connected, and the server's log as it happens. Closing that window doesn't stop the server.
+The server has no window of its own. Its logs are in `logs/` (`server.log`, `caddy.log`, `turn.log`).
+Don't start it with `npm start` on the VPS: the services already run it with the settings from `.env`.
 
-Logs are in `server\logs\` (`turn.log` for the TURN relay). If the server was stopped, double-click
-`server\start.bat`. It starts all three tasks (it asks for administrator rights) and checks that the
-site answers. Don't use `npm start` on the VPS: the task already runs the server with the tokens from `.env`.
-Remove everything with `server\deploy\windows\uninstall.ps1`.
+### Move to another VPS
 
-## Deploy elsewhere
+Everything that makes a server *yours* is in `.env`: the two tokens, plus the port and domain.
+
+1. Copy `.env` from the old server folder (Linux: `/opt/call-bridge/.env`) into the new copy, next to
+   `setup.cmd` / `setup.sh`. Windows and Linux use the same file, so you can move between them.
+2. Run setup on the new VPS. It keeps the tokens and detects the new IP.
+3. Point the clients at the new address: the extension's **Server URL**, and the Call Bridge app at the
+   new `https://<address>/` (install the app again from there; the installed app is tied to its address).
+   The tokens stay the same. With your own domain, change its DNS A record instead and nothing else changes.
+4. Uninstall on the old VPS. Do the switch when no call is live; calls don't move between servers.
+
+### Update
+
+Unpack the newer package over the old folder (Windows; `.env`, `bin\` and `logs\` stay) or anywhere
+(Linux), and run setup again. It replaces the app files, keeps the tokens and certificates, and
+restarts the services; if calls are live, it asks first. Run setup again too if the VPS's IP changed.
+
+## Other hosting
 
 The server must be reachable over **TLS** (`wss://`), because the extension refuses plain `ws://`
 for anything but localhost, and the console's microphone needs `https://`.
-Any host that runs a Docker container or Node 18+ and terminates TLS works, for example
-Render, Fly.io, Railway, Azure App Service or a VM behind Caddy or nginx.
+Any host that runs a Docker container or Node 20.6+ and terminates TLS works, for example
+Render, Fly.io, Railway, Azure App Service or a VM behind your own Caddy or nginx.
 
 ```bash
 docker build -t call-bridge .
@@ -164,6 +197,15 @@ The app reconnects by itself after a network drop or a server restart. During a 
 through either (for up to a minute) and nothing said in the meantime is lost: see "No audio lost" below.
 "Teams computer linked" shows that the extension is online.
 Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
+
+**Remove background noise from my microphone** (on by default, remembered per computer) cleans your
+voice before it goes to the caller. RNNoise, a small speech-trained neural network
+(`public/rnnoise.wasm`, licenses in `public/rnnoise-LICENSE.txt`), removes fans, hum, traffic, typing and similar sounds, and a gate sends true
+silence between your words, so the caller hears nothing while you're quiet. It runs on your computer,
+uses about 3% of one CPU core and adds 10 ms of delay. It can be switched on or off mid-call. The first
+0.8 s of each call is sent as silence while it learns the room's noise. Other people talking near you
+are speech, so they're reduced less: a headset microphone close to your mouth helps most there. If it
+can't run, the app says so and uses Chrome's own lighter noise suppression instead.
 
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
 "Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
@@ -232,5 +274,6 @@ npm test
 
 The test starts the server on a random port. It checks authentication, the echo fallback,
 operator take and hand-back, camera-control signaling relay, and runs the extension's own `bridge.js`
-against the server. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
+against the server. It then runs the app's noise filter (`capture-worklet.js` with the real
+`rnnoise.wasm`) on loud noise and checks that only silence comes out. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
 see `teams-auto-answer/README.md` for how that was verified against a mock Teams page.
