@@ -38,10 +38,11 @@ const ENDED_MEMORY_MS = 10 * 60000; // how long an ended call's id is remembered
 const STATIC = {
   '/': 'index.html', '/console.js': 'console.js', '/capture-worklet.js': 'capture-worklet.js', '/console.css': 'console.css',
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
+  '/rnnoise.wasm': 'rnnoise.wasm',
 };
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.webmanifest': 'application/manifest+json', '.png': 'image/png',
+  '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.wasm': 'application/wasm',
 };
 
 const CLOSE = { unauthorized: 4001, badHello: 4002, replaced: 4003 };
@@ -501,7 +502,8 @@ const server = http.createServer((req, res) => {
     if (err) { res.writeHead(500).end(); return; }
     res.writeHead(200, {
       'Content-Type': TYPES[path.extname(file)],
-      'Content-Security-Policy': "default-src 'self'; connect-src 'self'; media-src 'self' blob:",
+      // wasm-unsafe-eval lets the app's noise filter (rnnoise.wasm, served from here) compile.
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; media-src 'self' blob:",
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-cache',
