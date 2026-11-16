@@ -198,6 +198,15 @@ through either (for up to a minute) and nothing said in the meantime is lost: se
 "Teams computer linked" shows that the extension is online.
 Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
 
+**Remove background noise from my microphone** (on by default, remembered per computer) cleans your
+voice before it goes to the caller. RNNoise, a small speech-trained neural network
+(`public/rnnoise.wasm`, licenses in `public/rnnoise-LICENSE.txt`), removes fans, hum, traffic, typing and similar sounds, and a gate sends true
+silence between your words, so the caller hears nothing while you're quiet. It runs on your computer,
+uses about 3% of one CPU core and adds 10 ms of delay. It can be switched on or off mid-call. The first
+0.8 s of each call is sent as silence while it learns the room's noise. Other people talking near you
+are speech, so they're reduced less: a headset microphone close to your mouth helps most there. If it
+can't run, the app says so and uses Chrome's own lighter noise suppression instead.
+
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
 "Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
 only needed while actually in control. **Stop camera** hands the video back; leaving the call does the same.
@@ -265,5 +274,6 @@ npm test
 
 The test starts the server on a random port. It checks authentication, the echo fallback,
 operator take and hand-back, camera-control signaling relay, and runs the extension's own `bridge.js`
-against the server. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
+against the server. It then runs the app's noise filter (`capture-worklet.js` with the real
+`rnnoise.wasm`) on loud noise and checks that only silence comes out. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
 see `teams-auto-answer/README.md` for how that was verified against a mock Teams page.
