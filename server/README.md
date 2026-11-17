@@ -198,14 +198,18 @@ through either (for up to a minute) and nothing said in the meantime is lost: se
 "Teams computer linked" shows that the extension is online.
 Only one app can answer a given ring. If the app is closed, the call keeps ringing in Teams as usual.
 
-**Remove background noise from my microphone** (on by default, remembered per computer) cleans your
-voice before it goes to the caller. RNNoise, a small speech-trained neural network
-(`public/rnnoise.wasm`, licenses in `public/rnnoise-LICENSE.txt`), removes fans, hum, traffic, typing and similar sounds, and a gate sends true
-silence between your words, so the caller hears nothing while you're quiet. It runs on your computer,
-uses about 3% of one CPU core and adds 10 ms of delay. It can be switched on or off mid-call. The first
-0.8 s of each call is sent as silence while it learns the room's noise. Other people talking near you
-are speech, so they're reduced less: a headset microphone close to your mouth helps most there. If it
-can't run, the app says so and uses Chrome's own lighter noise suppression instead.
+Your voice reaches the caller without background noise: Chrome's own noise suppression, echo
+cancellation and automatic gain are on, and a high-pass filter removes hum and rumble. The app opens
+the microphone with Chrome's own functions, so another extension that swaps in processed audio (such
+as Background Noise Remover) is bypassed.
+
+**Not Headset** (on the call card) switches your voice to the camera's own microphone, for when the
+headset has to come off mid-call; press **Use headset** to switch back. The call isn't interrupted, the
+choice is remembered on this computer, and if the headset is unplugged during a call the app switches
+to the camera microphone by itself. The camera microphone is the input in the same USB device as a
+camera, or one named like a camera. If Windows doesn't expose one (check Sound settings, Recording),
+the app says so and keeps the headset. Microphones are always opened by exact device, never "any
+microphone".
 
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
 "Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
@@ -274,6 +278,5 @@ npm test
 
 The test starts the server on a random port. It checks authentication, the echo fallback,
 operator take and hand-back, camera-control signaling relay, and runs the extension's own `bridge.js`
-against the server. It then runs the app's noise filter (`capture-worklet.js` with the real
-`rnnoise.wasm`) on loud noise and checks that only silence comes out. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
+against the server. It doesn't exercise `turn-server.js` or real WebRTC media (no camera/network in CI);
 see `teams-auto-answer/README.md` for how that was verified against a mock Teams page.

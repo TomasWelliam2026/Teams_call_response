@@ -6,7 +6,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/smoke.js && node test/noise-filter.js",
+    "test": "node test/smoke.js",
     "package": "node deploy/package.js"
   },
   "engines": { "node": ">=20.6" },
