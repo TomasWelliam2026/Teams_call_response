@@ -20,7 +20,7 @@
 // WebRTC signaling details live only in page-audio.js (page world) and console.js (operator app).
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.6.2';
+  const CLIENT = 'teams-call-answerer/0.6.3';
   const RECONNECT_FOR_MS = 60000;  // keep reconnecting this long after the connection drops mid-call (the server holds the call as long)
   const HELLO_TIMEOUT_MS = 8000;
   const STUCK_BUFFERED = 1024 * 1024; // ~30 s of audio not leaving: treat the connection as dead and reconnect
@@ -40,11 +40,27 @@
     return bytes.buffer;
   }
 
+  /**
+   * The server's WebSocket address for `path` ('/call' or '/station'), from the Server URL as typed:
+   * wss://host/call, wss://host, wss://host/ and https://host all lead to the same server. Without
+   * this, "wss://host/" became "wss://host//station" and "wss://host/" for calls, which the server
+   * doesn't serve, so nothing rang and no audio got through.
+   */
+  function endpoint(url, path) {
+    const u = new URL(url);
+    if (u.protocol === 'https:') u.protocol = 'wss:';
+    if (u.protocol === 'http:') u.protocol = 'ws:';
+    u.pathname = u.pathname.replace(/\/+(call|station|operator)?\/*$/, '') + path;
+    u.search = '';
+    u.hash = '';
+    return u.href;
+  }
+
   /** Returns an error message, or null if the URL is usable. Audio leaves the machine, so remote servers need TLS. */
   function checkServerUrl(url) {
     if (!url) return 'Set the server URL in the side panel.';
     let u;
-    try { u = new URL(url); } catch { return 'Server URL is not a valid URL.'; }
+    try { u = new URL(endpoint(url, '/call')); } catch { return 'Server URL is not a valid URL.'; }
     if (u.protocol === 'wss:') return null;
     if (u.protocol === 'ws:' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) return null;
     return 'Server URL must start with wss:// (ws:// is only allowed for localhost).';
@@ -80,7 +96,7 @@
     const toPort = (msg) => { try { port.postMessage(msg); } catch { /* content script went away */ } };
 
     function connect(cfg) {
-      ws = new WebSocket(cfg.serverUrl);
+      ws = new WebSocket(endpoint(cfg.serverUrl, '/call'));
       ws.binaryType = 'arraybuffer';
       helloTimer = setTimeout(() => ws.close(), HELLO_TIMEOUT_MS);
       ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token: cfg.token, callId, ringId, caller, format: FORMAT, client: CLIENT, have, sent, since: since || undefined }));
@@ -192,7 +208,7 @@
     return new Promise((resolve) => {
       const started = Date.now();
       let ws;
-      try { ws = new WebSocket(serverUrl); } catch (err) { resolve({ ok: false, message: err.message }); return; }
+      try { ws = new WebSocket(endpoint(serverUrl, '/call')); } catch (err) { resolve({ ok: false, message: err.message }); return; }
       const done = (res) => { clearTimeout(timer); try { ws.close(1000); } catch { /* ignore */ } resolve(res); };
       const timer = setTimeout(() => done({ ok: false, message: 'No answer from the server within 8 s.' }), HELLO_TIMEOUT_MS);
       ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', token, test: true, format: FORMAT, client: CLIENT }));
@@ -229,8 +245,6 @@
     let keepalive = null;
     let wantedKey = null; // url + token of the current connection
 
-    const stationUrl = (callUrl) => callUrl.replace(/\/call\/?$/, '') + '/station';
-
     function send(msg) {
       if (ready && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
     }
@@ -248,7 +262,7 @@
       const cfg = await getConfig();
       const usable = cfg.enabled && cfg.token && cfg.serverUrl && !checkServerUrl(cfg.serverUrl);
       if (!usable) { teardown(); wantedKey = null; onStatus?.({ state: 'off' }); return; }
-      const url = stationUrl(cfg.serverUrl);
+      const url = endpoint(cfg.serverUrl, '/station');
       const key = `${url} ${cfg.token}`;
       if (ws && wantedKey === key && ws.readyState <= WebSocket.OPEN) return;
       teardown();

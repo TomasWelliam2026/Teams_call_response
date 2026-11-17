@@ -26,7 +26,8 @@ It shows nothing but its connection settings: everything about calls is recorded
 ## Connecting to the server
 
 Click the extension's toolbar icon: its side panel opens on the right. Enter the **Server URL**
-(`wss://your-server/call`) and the **Access token** (`BRIDGE_TOKEN` from `server\.env` on the server; see
+(`wss://your-server/call`; `wss://your-server`, `wss://your-server/` and `https://your-server` work too)
+and the **Access token** (`BRIDGE_TOKEN` from `server\.env` on the server; see
 **Server URL and tokens** in [`server/README.md`](../server/README.md)). That's the whole setup: the
 extension connects as soon as both are valid, and the status shows **Not set up**, **Connecting…**,
 **Connected** or **Disconnected** (with the reason; it keeps retrying).
