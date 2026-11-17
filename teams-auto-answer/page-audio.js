@@ -232,11 +232,41 @@
 
   // ---- The bridge: one answered call ------------------------------------------------------
 
+  const STALL_REPORT_MS = 2000; // the caller's audio stopped this long with the call still on: report it (checkStall)
+
+  /** Incoming audio packets and decoded samples so far, per connection (getStats). */
+  async function inboundAudio() {
+    const counts = new Map();
+    await Promise.all([...pcs].map(async (pc) => {
+      try {
+        let packets = 0;
+        let samples = 0;
+        (await pc.getStats()).forEach((s) => {
+          if (s.type !== 'inbound-rtp' || s.kind !== 'audio') return;
+          packets += s.packetsReceived || 0;
+          samples += s.totalSamplesReceived || 0;
+        });
+        counts.set(pc, { packets, samples });
+      } catch { /* closed */ }
+    }));
+    return counts;
+  }
+
   function createBridge(callId, ignore) {
     const engine = trackEngine();
     const toFrames = framer((pcm) => post({ type: 'audio', pcm }, [pcm]));
     // The incoming audio also clocks the outgoing (see trackEngine).
-    const receiver = createReceiver((samples) => { toFrames(samples); engine.tick(); }, (message) => post({ type: 'note', message }));
+    const receiver = createReceiver((samples) => {
+      if (stalledSince) {
+        post({ type: 'note', message: `The caller's audio came back after ${((Date.now() - lastAudioAt) / 1000).toFixed(1)} s.` });
+        stalledSince = 0;
+      }
+      lastAudioAt = Date.now();
+      toFrames(samples);
+      engine.tick();
+    }, (message) => post({ type: 'note', message }));
+    let lastAudioAt = Date.now();
+    let stalledSince = 0; // set while the caller's audio has stopped arriving (see checkStall)
     const injected = new Map(); // sender -> original track
     const peers = new Set();
     const startedAt = Date.now();
@@ -416,6 +446,39 @@
       // A connection Teams created but never started ("new") doesn't keep the call alive.
       if (![...peers].some(pc => pc.connectionState !== 'new')) return stop('Call ended.');
       sync();
+      checkStall();
+    }
+
+    /**
+     * The call goes on but the caller's audio stopped reaching the bridge: write down, for the server's
+     * log, what the call's audio looks like at that moment. Whether network packets still arrive tells
+     * Teams/the network (they don't) apart from this browser not handing them on (they do).
+     */
+    async function checkStall() {
+      if (stalledSince || Date.now() - lastAudioAt < STALL_REPORT_MS) return;
+      stalledSince = Date.now();
+      const before = await inboundAudio();
+      await new Promise((r) => setTimeout(r, 1000));
+      const after = await inboundAudio();
+      const connections = [...pcs].map((pc, i) => {
+        const role = peers.has(pc) ? 'bridged' : ignore.has(pc) ? 'other call' : 'not bridged';
+        const tracks = pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio')
+          .map(t => `${t.readyState}${t.muted ? ' muted' : ''}${t.enabled ? '' : ' disabled'}`).join(', ') || 'none';
+        const a = before.get(pc);
+        const b = after.get(pc);
+        const rtp = a && b ? `${b.packets - a.packets} packets/s, ${b.samples - a.samples} samples/s` : 'no stats';
+        return `#${i + 1} ${role} ${pc.connectionState}/${pc.iceConnectionState}, audio tracks [${tracks}], ${rtp}`;
+      });
+      const teamsPlayers = [...new Set([...players, ...document.querySelectorAll('audio, video')])]
+        .filter(el => !ownPlayers.has(el) && el.srcObject?.getAudioTracks?.().length)
+        .map(el => `${el.paused ? 'paused' : 'playing'} vol ${el.volume}${el.muted ? ' muted' : ''}`);
+      if (!stalledSince) return; // came back meanwhile
+      post({
+        type: 'note',
+        message: `No audio from the caller for ${STALL_REPORT_MS / 1000} s, call still on. Page ${document.visibilityState}`
+          + `${document.hasFocus() ? ' focused' : ''}. Connections: ${connections.join('; ') || 'none'}. `
+          + `Teams players: ${teamsPlayers.join(', ') || 'none'}. Reading: ${receiver.describe()}.`,
+      });
     }
 
     let stopped = false;
@@ -653,6 +716,13 @@
 
     return {
       add,
+      /** For a stall report: each track being read, how long since it delivered audio, its player. */
+      describe() {
+        const now = performance.now();
+        return [...sources.values()].map(s => `${s.track.readyState}${s.track.muted ? ' muted' : ''}, `
+          + `${s.lastData ? `last audio ${((now - s.lastData) / 1000).toFixed(1)} s ago` : 'never delivered'}, `
+          + `own player ${s.el.paused ? 'paused' : 'playing'}`).join('; ') || 'no tracks';
+      },
       prune() { for (const track of [...sources.keys()]) if (track.readyState === 'ended') drop(track); },
       close() { for (const track of [...sources.keys()]) drop(track); },
     };
