@@ -49,6 +49,9 @@ the meeting was joined.
 
 - Everything you'd hear from the caller goes to the server as 16 kHz mono PCM.
 - What the server sends back replaces this computer's microphone in the call.
+- **The Teams tab is muted** while the call is bridged, so this computer's speakers don't play the caller
+  as well (heard twice when both are in one room). It's unmuted when the bridge stops, unless it was
+  muted before.
 - **Mute is shared.** Mute in the app presses Teams' **Mute mic** here, and Teams' Mute here mutes the
   bridge and shows in the app. If this computer has no microphone, the app's Mute alone decides.
 - **Take full control (camera)** in the app puts that computer's camera into the call in place of this
