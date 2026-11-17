@@ -49,9 +49,9 @@ the meeting was joined.
 
 - Everything you'd hear from the caller goes to the server as 16 kHz mono PCM.
 - What the server sends back replaces this computer's microphone in the call.
-- **The Teams tab is muted** while the call is bridged, so this computer's speakers don't play the caller
-  as well (heard twice when both are in one room). It's unmuted when the bridge stops, unless it was
-  muted before.
+- **This computer's speakers are silent** while the call is bridged (Teams' players are set to volume 0),
+  so the caller isn't heard twice when this computer and the app are in one room. The volume comes back
+  when the bridge stops. The tab itself isn't muted: Chrome stops delivering a muted tab's call audio.
 - **Mute is shared.** Mute in the app presses Teams' **Mute mic** here, and Teams' Mute here mutes the
   bridge and shows in the app. If this computer has no microphone, the app's Mute alone decides.
 - **Take full control (camera)** in the app puts that computer's camera into the call in place of this
@@ -167,6 +167,10 @@ const offer = await opPc.createOffer(); await opPc.setLocalDescription(offer);
 __tcaPort.postMessage({ type: 'video-offer', callId: 'cam-test', sdp: offer.sdp });
 // then feed opPc the resulting video-answer/video-ice messages the same way __tcaPort delivers them
 ```
+
+`http://localhost:8765/test/speaker-silence.html` (press Start, about 15 s) checks that Teams' player of
+the caller goes silent while bridged, that the call's audio still reaches the bridge the whole time
+(50 frames a second), and that the volume comes back afterwards. The page title shows PASS or FAIL.
 
 ## Limitations
 

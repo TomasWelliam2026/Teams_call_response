@@ -148,6 +148,23 @@
     get() { return bridge?.owns(this) ? bridge.originalOf(this) : nativeTrackGetter.call(this); },
   });
 
+  // Every <audio>/<video> given a stream (Teams plays the call's audio through these, attached to the
+  // page or not), so the bridge can silence this computer's speakers; see silenceSpeakers().
+  const players = new Set();
+  const ownPlayers = new WeakSet(); // the receiver's own muted elements
+  const srcObjectDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
+  Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+    configurable: true,
+    enumerable: true,
+    get() { return srcObjectDesc.get.call(this); },
+    set(stream) {
+      srcObjectDesc.set.call(this, stream);
+      if (!stream || ownPlayers.has(this)) return;
+      players.add(this);
+      bridge?.silenceSpeakers();
+    },
+  });
+
   const isOpen = (pc) => pc.signalingState !== 'closed' && !['closed', 'failed'].includes(pc.connectionState);
   const isConnected = (pc) => pc.connectionState === 'connected' || ['connected', 'completed'].includes(pc.iceConnectionState);
   const remoteAudio = (pc) => pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio' && t.readyState === 'live');
@@ -355,10 +372,34 @@
       if (reason) post({ type: 'note', message: `Camera: ${reason}` });
     }
 
+    // ---- Speakers: the caller is heard in the Call Bridge app, not here --------------------------
+    // Otherwise this computer plays the caller too, and anyone near both hears every word twice.
+    // Only the volume of Teams' players goes to 0: they keep playing, so Chrome keeps delivering the
+    // call's audio to the receiver (muting the whole tab stops that after a few seconds). Checked on
+    // every sync too, in case Teams sets a volume itself; put back when the bridge stops.
+    const silenced = new Map(); // element -> its volume before
+
+    function silenceSpeakers() {
+      if (stopped) return;
+      for (const el of new Set([...players, ...document.querySelectorAll('audio, video')])) {
+        const stream = el.srcObject;
+        if (!stream) { players.delete(el); continue; }
+        if (ownPlayers.has(el) || !stream.getAudioTracks?.().length) continue;
+        if (!silenced.has(el)) silenced.set(el, el.volume);
+        if (el.volume !== 0) el.volume = 0;
+      }
+    }
+
+    function restoreSpeakers() {
+      for (const [el, volume] of silenced) if (el.volume === 0) el.volume = volume;
+      silenced.clear();
+    }
+
     /** Picks up the call's connections, including ones Teams adds mid-call (moving to another media
      * server, renegotiation): their incoming audio is read and their microphone replaced right away. */
     function sync() {
       if (stopped) return;
+      silenceSpeakers();
       for (const pc of audioPeers()) {
         if (ignore.has(pc)) continue;
         peers.add(pc);
@@ -383,6 +424,7 @@
       stopped = true;
       clearInterval(watch);
       if (bridge === self) bridge = null;
+      restoreSpeakers();
       stopVideo();
       for (const [sender, original] of injected) {
         nativeReplaceTrack.call(sender, original).catch(() => {}); // fails harmlessly if the call is gone
@@ -401,6 +443,7 @@
       startVideo,
       videoIce,
       stopVideo: () => stopVideo('Stopped from the app.'),
+      silenceSpeakers,
       owns: (sender) => injected.has(sender),
       originalOf: (sender) => injected.get(sender) ?? null,
       setOriginal: (sender, track) => injected.set(sender, track),
@@ -443,6 +486,7 @@
       // Keeps Chrome decoding the track even after Teams stops playing it (an old connection),
       // so a copy never goes silent before the switch to the next one.
       const el = new Audio();
+      ownPlayers.add(el);
       el.muted = true;
       el.srcObject = new MediaStream([track]);
       el.play().catch(() => {});
