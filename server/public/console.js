@@ -102,6 +102,31 @@ async function cameraMic() {
 // which would process the voice: never picked by name or as a fallback.
 const VIRTUAL_LABEL = /noise remover|krisp|nvidia broadcast|virtual|voicemeeter|vb-audio|cable output/i;
 
+// ---- Krisp --------------------------------------------------------------------------------------
+// With the Krisp desktop app installed, its "Krisp Microphone" carries your voice with the noise
+// already removed by Krisp. It's used whenever it's present (switchable off), with Chrome's own
+// noise suppression off so the two don't both process the voice. Krisp decides which physical
+// microphone it listens to (set in the Krisp app), so "Not Headset" is unavailable meanwhile.
+// If Krisp goes away (app closed), the app carries on with the headset by itself.
+const KRISP_LABEL = /krisp/i;
+const KRISP_KEY = 'callBridge.krisp'; // 'off' after the user turned Krisp off
+let useKrisp = storage.get(KRISP_KEY) !== 'off';
+let krispPresent = false;
+
+async function krispMic() {
+  return (await media.enumerateDevices()).find(d => d.kind === 'audioinput' && KRISP_LABEL.test(d.label)
+    && d.deviceId && !['default', 'communications'].includes(d.deviceId)) || null;
+}
+
+/** The Krisp microphone when it's present and switched on, else null. */
+async function krispInUse() {
+  const mic = await krispMic();
+  krispPresent = !!mic;
+  return useKrisp ? mic : null;
+}
+
+const krispActive = () => useKrisp && krispPresent;
+
 /**
  * The headset: the real device behind Windows' default microphone. Asked for by its exact id,
  * because a generic request ("any microphone") is what extensions such as Background Noise Remover
@@ -120,6 +145,8 @@ async function headsetMic() {
 
 /** getUserMedia constraints for the chosen source; throws a plain-language error if it's missing. */
 async function micConstraintsFor(source) {
+  const krisp = await krispInUse();
+  if (krisp) return { audio: { ...RAW_AUDIO, noiseSuppression: false, deviceId: { exact: krisp.deviceId } } };
   if (source !== 'camera') {
     const mic = await headsetMic();
     return mic ? { audio: { ...RAW_AUDIO, deviceId: { exact: mic.deviceId } } } : MIC_CONSTRAINTS;
@@ -133,9 +160,30 @@ async function micConstraintsFor(source) {
   return { audio: { ...RAW_AUDIO, deviceId: { exact: mic.deviceId } } };
 }
 
+const NOT_HEADSET_TITLE = $('notHeadset').title;
+
 function setMicSourceButton() {
-  $('notHeadset').setAttribute('aria-pressed', micSource === 'camera');
-  $('notHeadset').textContent = micSource === 'camera' ? 'Use headset' : 'Not Headset';
+  const btn = $('notHeadset');
+  const krisp = krispActive();
+  btn.disabled = krisp;
+  btn.title = krisp ? 'Krisp is in use: choose the headset or camera microphone in the Krisp app' : NOT_HEADSET_TITLE;
+  btn.setAttribute('aria-pressed', !krisp && micSource === 'camera');
+  btn.textContent = !krisp && micSource === 'camera' ? 'Use headset' : 'Not Headset';
+  $('krispRow').hidden = !krispPresent;
+  $('useKrisp').checked = useKrisp;
+}
+
+/** Reopens the call's microphone with the current choice (Krisp switched on/off, or appeared/gone). */
+async function reopenMic() {
+  if (audio?.input) await switchMic(micSource, { remember: false });
+}
+
+/** Krisp appearing or disappearing (its app started or closed): update the button, and the call's mic. */
+async function refreshKrisp() {
+  krispPresent = !!(await krispMic());
+  setMicSourceButton();
+  const track = audio?.stream?.getAudioTracks()[0];
+  if (track && audio.input && KRISP_LABEL.test(track.label) !== krispActive()) await reopenMic();
 }
 
 /**
@@ -170,7 +218,8 @@ async function switchMic(source, { remember = true } = {}) {
 
 function showMicSource(stream, source) {
   const track = stream.getAudioTracks()[0];
-  $('micSource').textContent = `Microphone: ${track?.label || source}, background noise removed`;
+  const how = KRISP_LABEL.test(track?.label || '') ? 'noise removed by Krisp' : 'background noise removed';
+  $('micSource').textContent = `Microphone: ${track?.label || source}, ${how}`;
 }
 
 /**
@@ -183,10 +232,17 @@ function watchMic(mine) {
   const track = mine.stream.getAudioTracks()[0];
   if (!track) return;
   const deviceId = track.getSettings().deviceId;
+  const isKrisp = KRISP_LABEL.test(track.label);
   track.onended = async () => {
-    if (audio !== mine || mine.ending || mine.stream?.getAudioTracks()[0] !== track || micSource !== 'headset') return;
+    if (audio !== mine || mine.ending || mine.stream?.getAudioTracks()[0] !== track) return;
     const present = (await media.enumerateDevices()).some(d => d.kind === 'audioinput' && d.deviceId === deviceId);
     if (audio !== mine || mine.ending) return;
+    if (isKrisp) { // Krisp closed: carry on with the headset (or reopen Krisp if it's only been reset)
+      if (!present) setStatus('Krisp is no longer available: switching to the headset microphone.');
+      switchMic(micSource, { remember: false });
+      return;
+    }
+    if (micSource !== 'headset') return;
     if (present) {
       switchMic('headset', { remember: false }); // still plugged in: just reopen it
     } else {
@@ -225,6 +281,7 @@ async function checkMic() {
     stream.getTracks().forEach(t => t.stop());
     $('mic').textContent = label;
     $('mic').dataset.ok = 'true';
+    refreshKrisp();
   } catch (err) {
     $('mic').textContent = micProblem(err);
     $('mic').dataset.ok = 'false';
@@ -662,8 +719,16 @@ $('mute').addEventListener('click', () => {
   setMuted(next);
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute', muted: next }));
 });
-$('notHeadset').addEventListener('click', () => switchMic(micSource === 'camera' ? 'headset' : 'camera'));
+$('notHeadset').addEventListener('click', () => { if (!krispActive()) switchMic(micSource === 'camera' ? 'headset' : 'camera'); });
+$('useKrisp').addEventListener('change', () => {
+  useKrisp = $('useKrisp').checked;
+  storage.set(useKrisp ? '' : 'off', KRISP_KEY);
+  setMicSourceButton();
+  reopenMic();
+});
+navigator.mediaDevices?.addEventListener('devicechange', () => refreshKrisp());
 setMicSourceButton();
+refreshKrisp();
 $('release').addEventListener('click', () => ws.send(JSON.stringify({ type: 'release' })));
 $('camera').addEventListener('click', () => (camera ? stopCamera() : startCamera()));
 
