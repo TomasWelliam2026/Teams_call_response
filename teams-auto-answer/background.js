@@ -7,6 +7,7 @@ const TEAMS_URLS = [
   'https://teams.live.com/*',
 ];
 const bridges = new Map(); // callId -> { handle, tabId }
+const mutedTabs = new Set(); // Teams tabs this extension muted for a bridged call
 
 // Clicking the toolbar icon opens the connection settings in the browser's right-hand side panel.
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -22,6 +23,24 @@ async function getConfig() {
 // content.js opens a "bridge" port once an answered call's audio is flowing; bridge.js connects
 // that port to the server.
 
+// While a call is bridged its sound plays in the Call Bridge app, so the Teams tab is muted: the
+// Teams computer would otherwise play the caller through its own speakers too, and anyone near both
+// hears every word twice. Muting the tab only silences its speakers; the call's audio is still read
+// and sent. Unmuted when the bridge ends (handed back, call over), unless it was muted before.
+async function muteTab(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.mutedInfo?.muted || ![...bridges.values()].some(b => b.tabId === tabId)) return;
+  mutedTabs.add(tabId);
+  await chrome.tabs.update(tabId, { muted: true }).catch(() => mutedTabs.delete(tabId));
+}
+
+function unmuteTab(tabId) {
+  if ([...bridges.values()].some(b => b.tabId === tabId) || !mutedTabs.delete(tabId)) return;
+  chrome.tabs.update(tabId, { muted: false }).catch(() => {});
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => mutedTabs.delete(tabId));
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'bridge' || !port.sender?.tab) return;
   const tabId = port.sender.tab.id;
@@ -29,11 +48,14 @@ chrome.runtime.onConnect.addListener((port) => {
     getConfig,
     onStatus: (s) => {
       if (s.state === 'connecting') {
-        // One bridged call per Teams tab: a newly answered call replaces the previous one.
-        for (const [id, b] of bridges) if (b.tabId === tabId && id !== s.callId) b.handle.stop('A new call was answered.');
+        // One bridged call per Teams tab: a newly answered call replaces the previous one. Added
+        // first, so the previous one ending doesn't unmute the tab.
         bridges.set(s.callId, { handle, tabId });
+        for (const [id, b] of bridges) if (b.tabId === tabId && id !== s.callId) b.handle.stop('A new call was answered.');
+        muteTab(tabId);
       } else if (s.state === 'ended' || s.state === 'error') {
         bridges.delete(s.callId);
+        unmuteTab(tabId);
       }
     },
   });
