@@ -138,12 +138,16 @@ function setMicSourceButton() {
   $('notHeadset').textContent = micSource === 'camera' ? 'Use headset' : 'Not Headset';
 }
 
-/** Switches the call's microphone to `source` without interrupting the call; keeps the old one on failure. */
-async function switchMic(source) {
+/**
+ * Switches the call's microphone to `source` without interrupting the call; keeps the old one on
+ * failure. `remember`: save it as the choice for later calls (the button does; an automatic
+ * fallback after the headset is unplugged doesn't, so the next call starts on the headset again).
+ */
+async function switchMic(source, { remember = true } = {}) {
   const mine = audio;
   const previous = micSource;
   micSource = source;
-  storage.set(source === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
+  if (remember) storage.set(source === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
   setMicSourceButton();
   if (!mine?.input) return; // not on a call (or its mic isn't open yet): the next call uses it
   try {
@@ -158,7 +162,7 @@ async function switchMic(source) {
     showMicSource(stream, source);
   } catch (err) {
     micSource = previous;
-    storage.set(previous === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
+    if (remember) storage.set(previous === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
     setMicSourceButton();
     setStatus(err.name === 'NoCameraMic' ? err.message : micProblem(err));
   }
@@ -169,14 +173,25 @@ function showMicSource(stream, source) {
   $('micSource').textContent = `Microphone: ${track?.label || source}, background noise removed`;
 }
 
-/** A headset unplugged mid-call ends its track: carry on with the camera's microphone by itself. */
+/**
+ * A headset unplugged mid-call ends its track: carry on with the camera's microphone by itself.
+ * Chrome also ends a microphone track when Windows' device list changes (e.g. another microphone
+ * is opened or closed) with the headset still there; then the headset is simply reopened. The
+ * fallback isn't saved as the choice for later calls.
+ */
 function watchMic(mine) {
   const track = mine.stream.getAudioTracks()[0];
   if (!track) return;
-  track.onended = () => {
-    if (audio === mine && mine.stream?.getAudioTracks()[0] === track && micSource === 'headset') {
+  const deviceId = track.getSettings().deviceId;
+  track.onended = async () => {
+    if (audio !== mine || mine.ending || mine.stream?.getAudioTracks()[0] !== track || micSource !== 'headset') return;
+    const present = (await media.enumerateDevices()).some(d => d.kind === 'audioinput' && d.deviceId === deviceId);
+    if (audio !== mine || mine.ending) return;
+    if (present) {
+      switchMic('headset', { remember: false }); // still plugged in: just reopen it
+    } else {
       setStatus('The headset was disconnected: switching to the camera microphone.');
-      switchMic('camera');
+      switchMic('camera', { remember: false });
     }
   };
 }
@@ -499,6 +514,7 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
 
 function endCall(message) {
   if (audio) {
+    audio.ending = true; // the tracks stopped below aren't a headset being unplugged
     audio.stream?.getTracks().forEach(t => t.stop());
     audio.ctx.close();
     audio = null;

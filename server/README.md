@@ -205,9 +205,10 @@ as Background Noise Remover) is bypassed.
 
 **Not Headset** (on the call card) switches your voice to the camera's own microphone, for when the
 headset has to come off mid-call; press **Use headset** to switch back. The call isn't interrupted, the
-choice is remembered on this computer, and if the headset is unplugged during a call the app switches
-to the camera microphone by itself. The camera microphone is the input in the same USB device as a
-camera, or one named like a camera. If Windows doesn't expose one (check Sound settings, Recording),
+choice is remembered on this computer. If the headset is unplugged during a call the app switches
+to the camera microphone by itself for that call (not saved as your choice); if Windows only briefly
+resets the headset, the app reopens it instead. The camera microphone is the input in the same USB device as a
+camera, or one named like a camera. If Windows doesn't expose one (in Sound settings → Recording, show disabled devices and enable the camera's microphone),
 the app says so and keeps the headset. Microphones are always opened by exact device, never "any
 microphone".
 
