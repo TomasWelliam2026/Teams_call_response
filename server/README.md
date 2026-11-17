@@ -203,6 +203,12 @@ cancellation and automatic gain are on, and a high-pass filter removes hum and r
 the microphone with Chrome's own functions, so another extension that swaps in processed audio (such
 as Background Noise Remover) is bypassed.
 
+**Krisp.** If the Krisp desktop app is installed on this computer, the app uses its "Krisp Microphone" by
+default (switch: **Use Krisp microphone**). Krisp then removes the noise, so Chrome's own noise suppression is
+off for it, and you choose the headset or camera microphone in the Krisp app: **Not Headset** is disabled
+while Krisp is in use. If Krisp goes away during a call (its app is closed), the app carries on with the
+headset by itself.
+
 **Not Headset** (on the call card) switches your voice to the camera's own microphone, for when the
 headset has to come off mid-call; press **Use headset** to switch back. The call isn't interrupted, the
 choice is remembered on this computer. If the headset is unplugged during a call the app switches
