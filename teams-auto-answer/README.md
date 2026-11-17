@@ -94,7 +94,12 @@ Teams creates. It does nothing until armed. Then it reads every incoming audio t
 no click in the page), on every connection of the call, including ones Teams adds mid-call. When Teams
 moves a call to another media server, it briefly carries the same audio on two connections; the extension
 recognizes the copies by their loudness pattern and plays them once, switching to the new connection
-during a pause, so nothing is doubled or cut. What it notices is sent to the server log.
+during a pause, so nothing is doubled or cut. What it notices is sent to the server log. If the caller's
+audio stops reaching it for 2 s while the call goes on, it logs what the call's audio looks like at that
+moment: each connection's state, how many audio packets arrive and how much of them is decoded, Teams'
+players, and whether the page is in the background. Chrome hands on audio (silence, if need be) even
+when no packets arrive, so packets arriving with nothing decoded points at this browser, and no packets
+at Teams or the network.
 
 `content.js` finds ringing calls, presses Teams' buttons for the app, relays the audio to the background
 worker (which holds the WebSocket, `bridge.js`), and decides *when* to arm: a trusted press on a detected
@@ -172,6 +177,7 @@ __tcaPort.postMessage({ type: 'video-offer', callId: 'cam-test', sdp: offer.sdp 
 `http://localhost:8765/test/speaker-silence.html` (press Start, about 15 s) checks that Teams' player of
 the caller goes silent while bridged, that the call's audio still reaches the bridge the whole time
 (50 frames a second), and that the volume comes back afterwards. The page title shows PASS or FAIL.
+`test/receiver-alone.html` checks the same flow when Teams plays the caller through no element of its own.
 
 ## Limitations
 

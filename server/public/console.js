@@ -143,9 +143,12 @@ async function headsetMic() {
     || null;
 }
 
-/** getUserMedia constraints for the chosen source; throws a plain-language error if it's missing. */
-async function micConstraintsFor(source) {
-  const krisp = await krispInUse();
+/**
+ * getUserMedia constraints for the chosen source; throws a plain-language error if it's missing.
+ * `krisp: false` leaves Krisp out (its microphone couldn't be opened).
+ */
+async function micConstraintsFor(source, { krisp: allowKrisp = true } = {}) {
+  const krisp = allowKrisp && await krispInUse();
   if (krisp) return { audio: { ...RAW_AUDIO, noiseSuppression: false, deviceId: { exact: krisp.deviceId } } };
   if (source !== 'camera') {
     const mic = await headsetMic();
@@ -466,10 +469,11 @@ function renderCalls(calls, mine) {
 let ringCtx = null;
 let ringTimer = null;
 
-/** Called on a click, so Chrome allows sound later (autoplay rules). */
+/** Called on a click, so Chrome allows sound later (autoplay rules); also starts a call's held-back sound. */
 function unlockSound() {
   ringCtx ||= new AudioContext();
   ringCtx.resume().catch(() => {});
+  if (audio?.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
 }
 
 function ringBurst() {
@@ -531,19 +535,37 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
   // Sound first, so the caller's first words play while the microphone is still being opened.
   // 48 kHz, the microphone's usual native rate, so Chrome rarely has to convert it.
   const ctx = new AudioContext({ sampleRate: 48000 });
-  const mine = audio = { ctx, stream: null, nextTime: 0, tap: null };
+  const mine = audio = { ctx, stream: null, nextTime: 0, tap: null, played: 0, micFrames: 0, micPeak: 0, micError: null };
+  // Chrome keeps sound off in a window nobody has clicked since it opened (e.g. one Windows started):
+  // say so, and the next click anywhere turns it on (unlockSound).
+  ctx.onstatechange = () => {
+    if (audio !== mine) return;
+    if (ctx.state !== 'running') soundBlocked(mine);
+    else if (mine.micError) setStatus(`${mine.micError} You can still listen.`);
+    else setMuted(muted);
+    if (mine.reported) reportSound(mine); // a change after the first report
+  };
   ctx.resume().catch(() => {});
+  setTimeout(() => soundBlocked(mine), 1000);
+  setTimeout(() => reportSound(mine), 5000); // by then the speakers and microphone have shown whether they work
   try {
     let stream;
     try {
       stream = await media.getUserMedia(await micConstraintsFor(micSource));
     } catch (err) {
-      if (micSource !== 'camera') throw err;
-      // The camera's microphone is gone: talk through the headset rather than not at all.
-      setStatus(`${err.name === 'NoCameraMic' ? err.message : micProblem(err)} Using the headset instead.`);
-      micSource = 'headset';
-      setMicSourceButton();
-      stream = await media.getUserMedia(await micConstraintsFor('headset'));
+      if (krispActive()) {
+        // Krisp's microphone is listed but won't open (its app isn't running): talk through the headset.
+        setStatus(`The Krisp microphone couldn't be opened (${micProblem(err)}) Using the headset instead.`);
+        stream = await media.getUserMedia(await micConstraintsFor('headset', { krisp: false }));
+      } else if (micSource === 'camera') {
+        // The camera's microphone is gone: talk through the headset rather than not at all.
+        setStatus(`${err.name === 'NoCameraMic' ? err.message : micProblem(err)} Using the headset instead.`);
+        micSource = 'headset';
+        setMicSourceButton();
+        stream = await media.getUserMedia(await micConstraintsFor('headset'));
+      } else {
+        throw err;
+      }
     }
     if (audio !== mine) { stream.getTracks().forEach(t => t.stop()); return; } // the call ended meanwhile
     mine.stream = stream;
@@ -558,15 +580,49 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
     const tap = mine.tap = new AudioWorkletNode(ctx, 'capture', {
       numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit',
     });
-    const toPcm = downsampler(ctx.sampleRate, (pcm) => { if (!muted && audio === mine) keepMic(pcm); });
+    const toPcm = downsampler(ctx.sampleRate, (pcm) => {
+      if (mine.micFrames++ < 250) mine.micPeak = Math.max(mine.micPeak, peakOf(pcm)); // the first 5 s, for reportSound
+      if (!muted && audio === mine) keepMic(pcm);
+    });
     tap.port.onmessage = (e) => toPcm(e.data);
     src.connect(highpass).connect(antiAlias).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
     watchMic(mine);
     showMicSource(stream, micSource);
     if (audio === mine) setMuted(muted); // shows "Talking to …" or "Muted …"
   } catch (err) {
-    if (audio === mine) setStatus(`${micProblem(err)} You can still listen.`);
+    if (audio !== mine) return;
+    mine.micError = micProblem(err);
+    setStatus(`${mine.micError} You can still listen.`);
+    reportSound(mine);
   }
+}
+
+/** Chrome hasn't let this call's sound start: ask for the click that does. */
+function soundBlocked(mine) {
+  if (audio === mine && mine.ctx.state === 'suspended') setStatus('Click anywhere in this window to hear the caller (Chrome keeps sound off until you do).');
+}
+
+/** Peak level of a 16-bit PCM frame, 0..1. */
+function peakOf(pcm) {
+  const s = new Int16Array(pcm);
+  let peak = 0;
+  for (let i = 0; i < s.length; i++) peak = Math.max(peak, Math.abs(s[i]));
+  return peak / 0x8000;
+}
+
+/**
+ * Tells the server, for its log, how this call's sound is doing here: whether the speakers run
+ * and how much of the caller has played, and which microphone is open and whether it hears anything.
+ */
+function reportSound(mine) {
+  if (audio !== mine || !active || ws?.readyState !== WebSocket.OPEN) return;
+  mine.reported = true;
+  ws.send(JSON.stringify({
+    type: 'sound', callId: active.callId,
+    speakers: mine.ctx.state, playedS: +mine.played.toFixed(1),
+    mic: mine.stream?.getAudioTracks()[0]?.label || null, micError: mine.micError,
+    micPeak: mine.micFrames ? +mine.micPeak.toFixed(4) : null,
+  }));
 }
 
 function endCall(message) {
@@ -669,6 +725,7 @@ function play(pcm) {
   src.connect(ctx.destination);
   src.start(audio.nextTime);
   audio.nextTime += buf.duration;
+  audio.played += buf.duration;
 }
 
 function rms(f) {

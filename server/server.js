@@ -268,7 +268,7 @@ function onCallSocket(ws) {
       clearTimeout(call.rewindTimer);
     } else if (msg.type === 'note' && call) {
       // Something worth knowing after the call, e.g. Teams switching media connections.
-      log(`call ${call.id.slice(0, 8)}: ${String(msg.message || '').slice(0, 300)}`);
+      log(`call ${call.id.slice(0, 8)}: ${String(msg.message || '').slice(0, 1500)}`);
     } else if (msg.type === 'end' && call) {
       endCall(call, msg.reason || 'extension ended the call');
       call = null;
@@ -374,6 +374,7 @@ function onOperatorSocket(ws) {
       if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
       authed = true;
       operators.add(ws);
+      log(`app connected from ${ws.remote}; ${operators.size} connected`);
       sendJson(ws, { type: 'ready', format: FORMAT, fallback: FALLBACK, iceServers: iceServersFor(ws) });
       if (typeof msg.resume === 'string') resumeCall(msg.resume, Math.max(0, Number(msg.have) || 0));
       broadcastCalls();
@@ -386,7 +387,19 @@ function onOperatorSocket(ws) {
         if (!call) return sendJson(ws, { type: 'error', message: 'That call has ended.' });
         if (call.operator && call.operator !== ws) return sendJson(ws, { type: 'error', message: 'Another operator has that call.' });
         giveCallTo(call, ws);
+        log(`call ${call.id.slice(0, 8)} taken by the app`);
         break;
+      case 'sound': { // the app's own report: do its speakers and microphone work on this call?
+        const mine = myCall();
+        if (mine?.operator !== ws) break;
+        const text = (v) => String(v).replace(/[^\x20-\x7e]/g, '').slice(0, 200);
+        const level = Number(msg.micPeak);
+        const mic = msg.micError ? `microphone failed: ${text(msg.micError)}`
+          : msg.mic == null ? 'microphone not open yet'
+          : `microphone "${text(msg.mic)}"${Number.isFinite(level) && msg.micPeak !== null ? (level > 0 ? `, peak ${Math.round(20 * Math.log10(level))} dBFS` : ', SILENT') : ''}`;
+        log(`call ${mine.id.slice(0, 8)}: app sound: speakers ${text(msg.speakers)}, ${Number(msg.playedS) || 0} s of the caller played; ${mic}`);
+        return; // nothing for the other apps to update
+      }
       case 'answer':
       case 'decline': {
         const ring = rings.get(msg.ringId);
@@ -427,7 +440,7 @@ function onOperatorSocket(ws) {
   ws.on('close', () => {
     clearTimeout(helloTimer);
     release('disconnected');
-    operators.delete(ws);
+    if (operators.delete(ws)) log(`app disconnected (${ws.remote}); ${operators.size} connected`);
     for (const [id, p] of pendingResume) if (p.op === ws) { clearTimeout(p.timer); pendingResume.delete(id); }
     broadcastCalls();
   });
