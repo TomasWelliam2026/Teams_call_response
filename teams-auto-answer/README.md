@@ -64,6 +64,23 @@ kept and sent again (see the server README, "No audio lost").
 > everyone on the call must be told, or must agree, before a call is recorded or relayed. Your organization's Teams policy
 > may also forbid it. Tell callers, for example with a greeting from the server, and check the rules that apply to you.
 
+### Teams' media comes from the relay, not this computer's devices
+
+This computer's camera and microphones aren't used. When Teams asks for a camera or microphone, the
+extension answers at once with placeholder tracks (black video, inaudible audio), so Teams always
+sets up sending audio and video, whatever devices this computer has and whatever other extensions
+(noise removers) would do with a real device. The bridge then puts the server's audio and the Call
+Bridge app's camera on those channels; neither is filtered or processed by the extension.
+
+Teams' camera on this computer follows the app's camera exactly: on while the app sends its camera,
+off at all other times, from the pre-join screen on (it's switched back off if turned on here).
+
+The app controls this computer's voice entirely: its Mute decides whether the caller hears it, and
+Teams' Mute button here is pressed to match, so the others see the right state (Teams may join
+muted; it's unmuted to match the app). Pressing Teams' Mute here is switched back; it never silences
+the app. Teams' "you" tile
+shows the app's camera, unmirrored, exactly as the other side sees it.
+
 ## How it works
 
 `page-audio.js` runs in Teams' own page context from the first moment, to see the WebRTC connections

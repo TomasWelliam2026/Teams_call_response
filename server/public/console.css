@@ -39,5 +39,6 @@ label.check input { flex: none; }
 button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; }
 button:disabled { opacity: .55; cursor: default; }
 button[aria-pressed=true]#camera { background: var(--accent); border-color: var(--accent); color: #fff; }
+.preview[hidden] { display: none; }
 .preview { margin-top: 10px; width: 100%; max-width: 240px; border-radius: 8px; background: #000; display: block; }
-#noiseNote:empty { display: none; }
+

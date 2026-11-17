@@ -109,15 +109,15 @@
     }
   }
 
-  // ---- Mute, shared between the local app and Teams ----------------------------------------
-  // While bridged, the caller hears the app user, so Teams' own Mute button must silence the bridge,
-  // and the app's Mute presses Teams' button so Teams (and the caller) show the call as muted.
+  // ---- Mute: the local app controls this computer's voice entirely -------------------------
+  // While bridged, the caller hears only the app, and the app's Mute alone decides whether they do.
+  // Teams' own Mute button just shows that state to everyone: it's pressed to match the app (also
+  // right after joining, since Teams may join muted), and pressing it here changes nothing - it's
+  // switched back. Teams' button never silences the app.
   // Teams' in-call button: data-tid="microphone-button", label "Mute mic" / "Unmute mic".
-  let appMuted = false;     // last request from the app
-  let appChangedAt = 0;
-  let seenTeams = null;     // Teams' button state as last seen, and when it last changed
-  let teamsChangedAt = 0;
+  let appMuted = false;     // the app's mute state (a new call starts unmuted)
   let reportedMute = null;  // last state sent to the page and the server
+  let lastMuteClick = 0;
 
   function micButton() {
     return document.querySelector('[data-tid="microphone-button"]')
@@ -125,7 +125,7 @@
         .find(b => /^\s*(un)?mute\b.*\b(mic|microphone)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
   }
 
-  /** Teams' mute state, or null when its button is missing or disabled (e.g. no microphone on this computer). */
+  /** Teams' mute state, or null when its button is missing or disabled. */
   function teamsMuted() {
     const btn = micButton();
     if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return null;
@@ -138,56 +138,66 @@
   function syncMute() {
     if (!bridgeCallId) return;
     const teams = teamsMuted();
-    if (teams !== seenTeams) { seenTeams = teams; teamsChangedAt = Date.now(); }
-    // The most recent action wins. Normally the app's request flips Teams' button and both agree;
-    // if Teams refuses to change (e.g. "Teams couldn't unmute"), the app's newer request still counts.
-    const muted = teams === null || appChangedAt > teamsChangedAt ? appMuted : teams;
-    if (muted === reportedMute) return;
-    reportedMute = muted;
-    pagePort.postMessage({ type: 'mute', callId: bridgeCallId, muted });
-    bridgePort?.postMessage({ type: 'mute-state', muted });
+    // One click at a time: Teams relabels its button a moment after a click.
+    if (teams !== null && teams !== appMuted && Date.now() - lastMuteClick > 1000) {
+      lastMuteClick = Date.now();
+      micButton().click();
+    }
+    if (appMuted === reportedMute) return;
+    reportedMute = appMuted;
+    pagePort.postMessage({ type: 'mute', callId: bridgeCallId, muted: appMuted });
+    bridgePort?.postMessage({ type: 'mute-state', muted: appMuted });
   }
 
   function appSetMute(muted) {
     appMuted = muted;
-    appChangedAt = Date.now();
-    const current = teamsMuted();
-    if (current !== null && current !== muted) micButton().click();
     syncMute();
-    setTimeout(syncMute, 300); // Teams relabels its button shortly after the click
   }
 
-  // ---- Camera control, shared with Teams the same way mute is ------------------------------
-  // The app's "Take full control (camera)" turns Teams' own Camera button on, so Teams (and the
-  // caller) show the call as having video; stopping it turns Teams' button back off, but only if
-  // we were the one who turned it on, so we never touch a camera the person enabled themselves.
-  let weEnabledCamera = false;
+  setInterval(syncMute, 1000); // also catches Teams joining muted, or its button being pressed here
+
+  // ---- Camera: Teams' camera is the app's camera ------------------------------------------
+  // This computer's Teams shows only the Call Bridge app's video: its camera button is on exactly
+  // while the app's camera is being sent, and off at all other times, from the pre-join screen on
+  // (switched back if turned on here). The video itself is put in by page-audio.js.
+  let appVideo = false;
+
+  // The pre-join screen has a switch instead of a button: <input data-tid="toggle-video"
+  // role="switch">, checked while the camera is on.
+  const prejoinCameraSwitch = () => document.querySelector('input[data-tid="toggle-video"]');
 
   function cameraButton() {
     return document.querySelector('[data-tid="camera-button"]')
       || [...document.querySelectorAll('button, [role="button"]')]
-        .find(b => /^\s*turn camera (on|off)\b/i.test(b.getAttribute('aria-label') || b.title || ''));
+        .find(b => /^\s*turn camera (on|off)\b/i.test(b.getAttribute('aria-label') || b.title || ''))
+      || prejoinCameraSwitch();
   }
 
   /** Teams' camera state, or null when its button is missing or disabled. */
   function teamsCameraOn() {
     const btn = cameraButton();
     if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return null;
+    if (btn.matches('input[data-tid="toggle-video"]')) return btn.checked;
     const label = btn.getAttribute('aria-label') || btn.title || '';
     if (/^\s*turn camera off\b/i.test(label)) return true; // offers to turn it off -> it's on
     if (/^\s*turn camera on\b/i.test(label)) return false;
     return null;
   }
 
-  function syncCameraState(active) {
+  /** Clicks Teams' camera button if it doesn't match the app's camera. */
+  function enforceCamera() {
     const current = teamsCameraOn();
-    if (active) {
-      if (current === false) { cameraButton().click(); weEnabledCamera = true; }
-    } else if (weEnabledCamera) {
-      weEnabledCamera = false;
-      if (current === true) cameraButton()?.click();
-    }
+    if (current !== null && current !== appVideo) cameraButton().click();
   }
+
+  function syncCameraState(active) {
+    appVideo = !!active;
+    enforceCamera();
+  }
+
+  // Always, including the pre-join screen and the lobby: without the app's camera, Teams' camera
+  // here is off. Only a bridged call with the app's camera on turns it on.
+  setInterval(() => { if (!bridgeCallId) appVideo = false; enforceCamera(); }, 1000);
 
   // ---- Ending the call for real, not just handing the bridge back --------------------------
   // A 1:1 call's Leave button is data-tid="hangup-button"; a meeting's is "hangup-main-btn" -
@@ -238,11 +248,8 @@
     closeBridgePort();
     bridgeCallId = callId;
     appMuted = false;
-    appChangedAt = 0;
-    seenTeams = null;
-    teamsChangedAt = 0;
     reportedMute = null;
-    weEnabledCamera = false;
+    syncCameraState(false); // a new call starts without video until the app sends its camera
     kept = [];
     produced = posted = received = 0;
     reopenSince = 0;
@@ -299,7 +306,7 @@
     });
     bridgePort.postMessage({ type: 'start', callId, ...callers.get(callId), have: received, sent: posted });
     reportedMute = null;
-    syncMute(); // tell the app whether Teams is muted right now
+    syncMute(); // tells the app its (unmuted) state and unmutes Teams to match
   }
 
   pagePort.onmessage = ({ data }) => {

@@ -133,9 +133,16 @@ async function keepTeamsTabsAlive() {
 // After the extension is installed, updated or reloaded, Teams tabs that were already open keep the
 // old, disconnected scripts and silently stop detecting calls. Reload them so the new scripts load
 // (page-audio.js must run before Teams starts). A tab that is playing sound may be in a call: leave it.
+/**
+ * After an install, update or reload, every Teams tab is reloaded, including one in a call: Chrome
+ * leaves the old content scripts running in open tabs, cut off from this new worker, so in such a
+ * tab nothing from the app would arrive any more (mute, audio, camera) and Teams would stay as it
+ * joined, e.g. muted. Reloading means rejoining the call there, which is the only way to get it
+ * relayed again anyway.
+ */
 async function reloadTeamsTabs() {
   for (const tab of await chrome.tabs.query({ url: TEAMS_URLS })) {
-    if (!tab.audible) chrome.tabs.reload(tab.id).catch(() => {});
+    chrome.tabs.reload(tab.id).catch(() => {});
   }
 }
 

@@ -38,11 +38,22 @@ const ENDED_MEMORY_MS = 10 * 60000; // how long an ended call's id is remembered
 const STATIC = {
   '/': 'index.html', '/console.js': 'console.js', '/capture-worklet.js': 'capture-worklet.js', '/console.css': 'console.css',
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
-  '/rnnoise.wasm': 'rnnoise.wasm',
+  '/background-effect.js': 'background-effect.js',
+  '/background-worker.js': 'background-worker.js',
+  // Three of Teams' own stock backgrounds, offered as the camera's background choices.
+  '/backgrounds/inTheZone1.jpg': 'backgrounds/inTheZone1.jpg',
+  '/backgrounds/inTheZone2.jpg': 'backgrounds/inTheZone2.jpg',
+  '/backgrounds/starfieldGravJump.jpg': 'backgrounds/starfieldGravJump.jpg',
+  // MediaPipe selfie segmentation (Apache-2.0) for the camera's background effect.
+  '/vendor/mediapipe/vision_bundle.mjs': 'vendor/mediapipe/vision_bundle.mjs',
+  '/vendor/mediapipe/vision_wasm_internal.js': 'vendor/mediapipe/vision_wasm_internal.js',
+  '/vendor/mediapipe/vision_wasm_internal.wasm': 'vendor/mediapipe/vision_wasm_internal.wasm',
+  '/vendor/mediapipe/selfie_segmenter.tflite': 'vendor/mediapipe/selfie_segmenter.tflite',
 };
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
-  '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.wasm': 'application/wasm',
+  '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.jpg': 'image/jpeg', '.wasm': 'application/wasm',
+  '.mjs': 'text/javascript; charset=utf-8', '.tflite': 'application/octet-stream',
 };
 
 const CLOSE = { unauthorized: 4001, badHello: 4002, replaced: 4003 };
@@ -64,7 +75,8 @@ function tokenMatches(given, expected) {
   return crypto.timingSafeEqual(a, b);
 }
 
-const sendJson = (ws, msg) => { if (ws?.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); };
+// No socket (e.g. the extension is reconnecting) or a closed one: the message is dropped.
+const sendJson = (ws, msg) => { if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg)); };
 
 // The TURN relay (turn-server.js) runs on the same host, reachable at whatever hostname the client
 // used to reach this server (ws.host, from the Host header) — same domain/IP, different port/protocol.
@@ -502,8 +514,8 @@ const server = http.createServer((req, res) => {
     if (err) { res.writeHead(500).end(); return; }
     res.writeHead(200, {
       'Content-Type': TYPES[path.extname(file)],
-      // wasm-unsafe-eval lets the app's noise filter (rnnoise.wasm, served from here) compile.
-      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; media-src 'self' blob:",
+      // wasm-unsafe-eval lets the camera's background segmenter (MediaPipe wasm, served from here) compile.
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; media-src 'self' blob:; img-src 'self' blob: data:",
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-cache',

@@ -11,7 +11,6 @@ const QUIET_RMS = 0.004;     // a 20 ms frame quieter than this is a pause
 const KEEP_FRAMES = 3000;    // the last 60 s of this microphone, to send again whatever didn't reach the server
 const RESUME_FOR_MS = 60000; // a call survives the connection being down this long (the server holds it as long)
 const TOKEN_KEY = 'callBridge.operatorToken';
-const NOISE_KEY = 'callBridge.noiseFilter'; // 'off' after the user turned the noise filter off
 
 const $ = (id) => document.getElementById(id);
 let ws = null;
@@ -19,7 +18,7 @@ let token = '';
 let wantConnected = false; // false after Sign out or a rejected token: don't reconnect
 let retry = 0;
 let retryTimer = null;
-let audio = null;   // { ctx, stream, nextTime, tap, denoiser } while on a call
+let audio = null;   // { ctx, stream, src, input, nextTime, tap } while on a call
 let active = null;  // { callId, caller, since }
 // The call's audio is numbered both ways, so a reconnect picks up exactly where it left off:
 let linked = false; // the server has (again) confirmed this app has the active call
@@ -53,29 +52,133 @@ const storage = {
 
 // ---- Microphone -------------------------------------------------------------------------------
 
-// Noise filter: RNNoise (rnnoise.wasm) runs in capture-worklet.js and removes background noise, and
-// a gate there silences everything between words. Chrome's own noise suppression is off meanwhile,
-// since it only smears what RNNoise gets to work with; it comes back on whenever the filter isn't running.
-let noiseFilter = storage.get(NOISE_KEY) !== 'off';
-let rnnoise = null; // Promise of rnnoise.wasm's bytes, or of null if it couldn't be fetched
+// The caller hears your voice without background noise: Chrome's own noise suppression, echo
+// cancellation and automatic gain are on, plus a high-pass filter for hum (below).
+const RAW_AUDIO = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+const MIC_CONSTRAINTS = { audio: RAW_AUDIO };
 
-function micConstraints(filtering) {
-  return { audio: { echoCancellation: true, noiseSuppression: !filtering, autoGainControl: true } };
+// Chrome's own microphone access, never another extension's. Extensions such as "Background Noise
+// Remover" replace navigator.mediaDevices.getUserMedia/enumerateDevices in every page and hand back
+// their own processed audio; this app does its own noise removal and must get the real microphone.
+// A blank same-origin frame still has Chrome's untouched functions, which are used on this page's
+// mediaDevices. Falls back to the page's own if the frame can't be made.
+const media = (() => {
+  const md = navigator.mediaDevices;
+  try {
+    const frame = document.createElement('iframe');
+    frame.hidden = true;
+    frame.setAttribute('aria-hidden', 'true');
+    document.documentElement.append(frame); // kept: functions of a removed frame stop working
+    const proto = frame.contentWindow.MediaDevices.prototype;
+    const native = (name) => (...args) => proto[name].apply(md, args);
+    return { getUserMedia: native('getUserMedia'), enumerateDevices: native('enumerateDevices') };
+  } catch {
+    return { getUserMedia: (c) => md.getUserMedia(c), enumerateDevices: () => md.enumerateDevices() };
+  }
+})();
+
+// "Not Headset": talk through the camera's own microphone instead of the headset, e.g. when the
+// headset has to come off mid-call. Remembered per computer, switchable at any time in a call.
+const MIC_SOURCE_KEY = 'callBridge.micSource'; // 'camera' while Not Headset is on
+let micSource = storage.get(MIC_SOURCE_KEY) === 'camera' ? 'camera' : 'headset';
+
+// Labels that mark a headset (or the jack it plugs into) and ones that mark a camera's microphone.
+const HEADSET_LABEL = /headset|headphone|earphone|jack|airpods|buds|hands-?free|bluetooth/i;
+const CAMERA_LABEL = /camera|webcam|\bcam\b|brio|c9[0-9]{2}|usb2\.0 mic|video/i;
+
+/**
+ * The camera's microphone: the audio input in the same device group as a camera (one USB device),
+ * else one whose name says camera/webcam. Never a headset. null when there isn't one.
+ */
+async function cameraMic() {
+  const devices = (await media.enumerateDevices())
+    .filter(d => d.deviceId && !['default', 'communications'].includes(d.deviceId));
+  const mics = devices.filter(d => d.kind === 'audioinput' && !HEADSET_LABEL.test(d.label) && !VIRTUAL_LABEL.test(d.label));
+  const cameraGroups = new Set(devices.filter(d => d.kind === 'videoinput').map(d => d.groupId));
+  return mics.find(d => cameraGroups.has(d.groupId)) || mics.find(d => CAMERA_LABEL.test(d.label)) || null;
 }
 
-function rnnoiseBytes() {
-  rnnoise ??= fetch('rnnoise.wasm').then((r) => (r.ok ? r.arrayBuffer() : null)).catch(() => null)
-    .then((bytes) => { if (!bytes) rnnoise = null; return bytes; }); // try again on the next call
-  return rnnoise;
+// Virtual microphones made by other software (e.g. the "Background Noise Remover" Chrome extension),
+// which would process the voice: never picked by name or as a fallback.
+const VIRTUAL_LABEL = /noise remover|krisp|nvidia broadcast|virtual|voicemeeter|vb-audio|cable output/i;
+
+/**
+ * The headset: the real device behind Windows' default microphone. Asked for by its exact id,
+ * because a generic request ("any microphone") is what extensions such as Background Noise Remover
+ * intercept and answer with their processed audio instead of the microphone itself.
+ */
+async function headsetMic() {
+  const devices = (await media.enumerateDevices()).filter(d => d.kind === 'audioinput');
+  const real = devices.filter(d => d.deviceId && !['default', 'communications'].includes(d.deviceId) && !VIRTUAL_LABEL.test(d.label));
+  const def = devices.find(d => d.deviceId === 'default');
+  const camera = await cameraMic();
+  return real.find(d => def && d.groupId === def.groupId && !VIRTUAL_LABEL.test(def.label))
+    || real.find(d => HEADSET_LABEL.test(d.label))
+    || real.find(d => d.deviceId !== camera?.deviceId)
+    || null;
 }
 
-/** Applies the switch to the call in progress; says when the filter can't run. */
-function applyNoiseFilter() {
-  const filtering = noiseFilter && !!audio?.denoiser;
-  if (audio?.tap) audio.tap.port.postMessage({ denoise: noiseFilter });
-  audio?.stream?.getAudioTracks().forEach((t) => t.applyConstraints(micConstraints(filtering).audio).catch(() => {}));
-  $('noiseNote').textContent = noiseFilter && audio?.denoiser === false
-    ? "Unavailable on this computer, so Chrome's lighter noise suppression is used instead." : '';
+/** getUserMedia constraints for the chosen source; throws a plain-language error if it's missing. */
+async function micConstraintsFor(source) {
+  if (source !== 'camera') {
+    const mic = await headsetMic();
+    return mic ? { audio: { ...RAW_AUDIO, deviceId: { exact: mic.deviceId } } } : MIC_CONSTRAINTS;
+  }
+  const mic = await cameraMic();
+  if (!mic) {
+    const err = new Error("No camera microphone was found. Check that the camera's microphone is enabled in Windows Sound settings (Recording), then try again.");
+    err.name = 'NoCameraMic';
+    throw err;
+  }
+  return { audio: { ...RAW_AUDIO, deviceId: { exact: mic.deviceId } } };
+}
+
+function setMicSourceButton() {
+  $('notHeadset').setAttribute('aria-pressed', micSource === 'camera');
+  $('notHeadset').textContent = micSource === 'camera' ? 'Use headset' : 'Not Headset';
+}
+
+/** Switches the call's microphone to `source` without interrupting the call; keeps the old one on failure. */
+async function switchMic(source) {
+  const mine = audio;
+  const previous = micSource;
+  micSource = source;
+  storage.set(source === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
+  setMicSourceButton();
+  if (!mine?.input) return; // not on a call (or its mic isn't open yet): the next call uses it
+  try {
+    const stream = await media.getUserMedia(await micConstraintsFor(source));
+    if (audio !== mine) { stream.getTracks().forEach(t => t.stop()); return; }
+    const src = mine.ctx.createMediaStreamSource(stream);
+    src.connect(mine.input);
+    mine.src?.disconnect();
+    mine.stream?.getTracks().forEach(t => t.stop());
+    Object.assign(mine, { stream, src });
+    watchMic(mine);
+    showMicSource(stream, source);
+  } catch (err) {
+    micSource = previous;
+    storage.set(previous === 'camera' ? 'camera' : '', MIC_SOURCE_KEY);
+    setMicSourceButton();
+    setStatus(err.name === 'NoCameraMic' ? err.message : micProblem(err));
+  }
+}
+
+function showMicSource(stream, source) {
+  const track = stream.getAudioTracks()[0];
+  $('micSource').textContent = `Microphone: ${track?.label || source}, background noise removed`;
+}
+
+/** A headset unplugged mid-call ends its track: carry on with the camera's microphone by itself. */
+function watchMic(mine) {
+  const track = mine.stream.getAudioTracks()[0];
+  if (!track) return;
+  track.onended = () => {
+    if (audio === mine && mine.stream?.getAudioTracks()[0] === track && micSource === 'headset') {
+      setStatus('The headset was disconnected: switching to the camera microphone.');
+      switchMic('camera');
+    }
+  };
 }
 
 /** Plain-language reason a microphone can't be used, from a getUserMedia error. */
@@ -98,12 +201,14 @@ function micProblem(err) {
 
 /** Asks for the microphone once (so Chrome shows its prompt now, not mid-call) and reports the result. */
 async function checkMic() {
-  rnnoiseBytes(); // fetched now, so a call doesn't wait for it
   try {
-    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(false));
-    const label = stream.getAudioTracks()[0]?.label || 'default microphone';
+    // A generic request first, since device names stay hidden until the microphone is allowed once.
+    const first = await media.getUserMedia(MIC_CONSTRAINTS);
+    first.getTracks().forEach(t => t.stop());
+    const stream = await media.getUserMedia(await micConstraintsFor(micSource).catch(() => micConstraintsFor('headset')));
+    const label = `Microphone ready: ${stream.getAudioTracks()[0]?.label || 'default microphone'}`;
     stream.getTracks().forEach(t => t.stop());
-    $('mic').textContent = `Microphone ready: ${label}`;
+    $('mic').textContent = label;
     $('mic').dataset.ok = 'true';
   } catch (err) {
     $('mic').textContent = micProblem(err);
@@ -352,33 +457,40 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
   $('activeCaller').textContent = caller;
   tick();
   // Sound first, so the caller's first words play while the microphone is still being opened.
-  // 48 kHz is what the noise filter works at; Chrome converts the microphone to it if needed.
+  // 48 kHz, the microphone's usual native rate, so Chrome rarely has to convert it.
   const ctx = new AudioContext({ sampleRate: 48000 });
-  const mine = audio = { ctx, stream: null, nextTime: 0, tap: null, denoiser: null };
+  const mine = audio = { ctx, stream: null, nextTime: 0, tap: null };
   ctx.resume().catch(() => {});
   try {
-    const wasm = await rnnoiseBytes();
-    if (!wasm) mine.denoiser = false;
-    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(noiseFilter && !!wasm));
+    let stream;
+    try {
+      stream = await media.getUserMedia(await micConstraintsFor(micSource));
+    } catch (err) {
+      if (micSource !== 'camera') throw err;
+      // The camera's microphone is gone: talk through the headset rather than not at all.
+      setStatus(`${err.name === 'NoCameraMic' ? err.message : micProblem(err)} Using the headset instead.`);
+      micSource = 'headset';
+      setMicSourceButton();
+      stream = await media.getUserMedia(await micConstraintsFor('headset'));
+    }
     if (audio !== mine) { stream.getTracks().forEach(t => t.stop()); return; } // the call ended meanwhile
     mine.stream = stream;
-    const src = ctx.createMediaStreamSource(stream);
-    const lowpass = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
+    const src = mine.src = ctx.createMediaStreamSource(stream);
+    // Not noise removal: the link carries 16 kHz audio, which can't hold anything above 8 kHz, and
+    // resampling without this would fold those highs back in as audible distortion (aliasing).
+    const antiAlias = new BiquadFilterNode(ctx, { type: 'lowpass', frequency: 7000 });
+    // Mains hum, desk thumps and fan rumble sit below any voice: cut them.
+    const highpass = mine.input = new BiquadFilterNode(ctx, { type: 'highpass', frequency: 80, Q: 0.7 });
     // Captured on the audio thread (AudioWorklet), so a busy or background window doesn't drop any of it.
     await ctx.audioWorklet.addModule('capture-worklet.js');
     const tap = mine.tap = new AudioWorkletNode(ctx, 'capture', {
       numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit',
-      processorOptions: { denoise: noiseFilter, rnnoise: wasm },
     });
     const toPcm = downsampler(ctx.sampleRate, (pcm) => { if (!muted && audio === mine) keepMic(pcm); });
-    tap.port.onmessage = (e) => {
-      if (e.data instanceof Float32Array) { toPcm(e.data); return; }
-      mine.denoiser = e.data.denoiser; // the worklet's one report: did RNNoise load?
-      if (!e.data.denoiser) console.warn('Noise filter unavailable:', e.data.error);
-      if (audio === mine) applyNoiseFilter();
-    };
-    if (!wasm) applyNoiseFilter(); // no report comes then
-    src.connect(lowpass).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
+    tap.port.onmessage = (e) => toPcm(e.data);
+    src.connect(highpass).connect(antiAlias).connect(tap).connect(new GainNode(ctx, { gain: 0 })).connect(ctx.destination);
+    watchMic(mine);
+    showMicSource(stream, micSource);
     if (audio === mine) setMuted(muted); // shows "Talking to …" or "Muted …"
   } catch (err) {
     if (audio === mine) setStatus(`${micProblem(err)} You can still listen.`);
@@ -418,9 +530,18 @@ function setCameraButton() {
 async function startCamera() {
   if (!active || camera) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
+    const raw = await media.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
+    // The background is applied here: in this mode the call carries this camera, not the Teams
+    // computer's, so a background chosen in Teams itself never reaches the caller.
+    let effect = null;
+    try {
+      effect = await BackgroundEffect.apply(raw, background);
+    } catch (err) {
+      setStatus(`Background effect unavailable, sending the plain camera: ${err.message}`);
+    }
+    const stream = effect?.stream || raw;
     const pc = new RTCPeerConnection({ iceServers });
-    camera = { pc, stream, callId: active.callId };
+    camera = { pc, stream, raw, effect, callId: active.callId };
     pc.onicecandidate = (e) => ws?.send(JSON.stringify({ type: 'video-ice', callId: active.callId, candidate: e.candidate || null }));
     pc.onconnectionstatechange = () => {
       if (camera && ['failed', 'closed'].includes(pc.connectionState)) stopCamera();
@@ -440,8 +561,9 @@ async function startCamera() {
 
 function stopCamera(notifyServer = true) {
   if (!camera) return;
-  const { pc, stream, callId } = camera;
-  stream.getTracks().forEach(t => t.stop());
+  const { pc, raw, effect, callId } = camera;
+  effect?.stop();
+  raw.getTracks().forEach(t => t.stop());
   pc.close();
   camera = null;
   $('cameraPreview').hidden = true;
@@ -524,14 +646,56 @@ $('mute').addEventListener('click', () => {
   setMuted(next);
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'mute', muted: next }));
 });
-$('noiseFilter').checked = noiseFilter;
-$('noiseFilter').addEventListener('change', () => {
-  noiseFilter = $('noiseFilter').checked;
-  storage.set(noiseFilter ? '' : 'off', NOISE_KEY);
-  applyNoiseFilter();
-});
+$('notHeadset').addEventListener('click', () => switchMic(micSource === 'camera' ? 'headset' : 'camera'));
+setMicSourceButton();
 $('release').addEventListener('click', () => ws.send(JSON.stringify({ type: 'release' })));
 $('camera').addEventListener('click', () => (camera ? stopCamera() : startCamera()));
+
+// ---- Camera background (see background-effect.js) ----------------------------------------------
+// The choices are Teams' own: blur, or one of three of its stock backgrounds (served from
+// /backgrounds). Remembered on this computer.
+const BACKGROUNDS = {
+  inTheZone1: 'backgrounds/inTheZone1.jpg',
+  inTheZone2: 'backgrounds/inTheZone2.jpg',
+  starfieldGravJump: 'backgrounds/starfieldGravJump.jpg',
+};
+const background = { mode: 'none', image: null };
+const images = {}; // choice -> Promise<HTMLImageElement>
+
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('That background could not be loaded.'));
+    img.src = url;
+  });
+}
+
+/** Sets `background` from a choice in the menu: 'none', 'blur', or a key of BACKGROUNDS. */
+async function chooseBackground(choice) {
+  if (!BACKGROUNDS[choice] && choice !== 'blur') choice = 'none';
+  try { localStorage.setItem('bgChoice', choice); } catch { /* storage blocked: not remembered */ }
+  if (BACKGROUNDS[choice]) {
+    images[choice] ??= loadImage(BACKGROUNDS[choice]);
+    const img = await images[choice].catch((err) => { delete images[choice]; setStatus(err.message); return null; });
+    if ($('bgMode').value !== choice) return; // changed again while loading
+    Object.assign(background, img ? { mode: 'image', image: img } : { mode: 'blur', image: null });
+  } else {
+    Object.assign(background, { mode: choice, image: null });
+  }
+  camera?.effect?.setSettings(background);
+  if (background.mode !== 'none') BackgroundEffect.preload().catch(() => setStatus('The background effect could not load.'));
+}
+
+$('bgMode').addEventListener('change', () => chooseBackground($('bgMode').value));
+
+(() => {
+  let choice = 'none';
+  try { choice = localStorage.getItem('bgChoice') || 'none'; } catch { /* nothing remembered */ }
+  $('bgMode').value = BACKGROUNDS[choice] || choice === 'blur' ? choice : 'none';
+  chooseBackground($('bgMode').value);
+})();
+
 $('handBack').addEventListener('click', () => {
   if (active) ws.send(JSON.stringify({ type: 'stop', callId: active.callId }));
 });

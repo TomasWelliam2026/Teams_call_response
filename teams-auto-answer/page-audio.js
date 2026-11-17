@@ -57,6 +57,79 @@
   window.RTCPeerConnection = PeerConnection;
   if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PeerConnection;
 
+  // ---- Teams' media comes from the relay, not from this computer's devices --------------------
+  // This computer's camera and microphones aren't used: what goes out is the server's audio and the
+  // Call Bridge app's camera. The extension answers Teams' camera/microphone requests itself:
+  //  - Audio: a near-silent Web Audio track, so Teams sets up sending audio at once. The bridge
+  //    then puts the server's audio on Teams' audio sender in its place (original logic), so the
+  //    server's audio goes out unprocessed, past Teams' own microphone processing. The extension
+  //    adds no processing of its own.
+  //  - Video: black placeholder frames, replaced on Teams' sender by the Call Bridge app's camera.
+  // Teams always gets an answer at once, so it always sets up sending audio and video.
+  const placeholderTracks = new Set();
+
+  function placeholderVideoTrack(video) {
+    const want = typeof video === 'object' ? video : {};
+    const pick = (v, d) => (typeof v === 'number' ? v : v?.ideal ?? v?.exact ?? v?.max ?? d);
+    const width = pick(want.width, 640), height = pick(want.height, 360);
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    const g = canvas.getContext('2d');
+    const paint = () => { g.fillStyle = '#000'; g.fillRect(0, 0, width, height); };
+    paint();
+    const track = canvas.captureStream(pick(want.frameRate, 15)).getVideoTracks()[0];
+    const timer = setInterval(() => { // a canvas only emits frames when drawn
+      if (track.readyState === 'ended') { clearInterval(timer); placeholderTracks.delete(track); } else paint();
+    }, 200);
+    placeholderTracks.add(track);
+    return track;
+  }
+
+  let hub = null; // { ctx, input, dest } once Teams first asks for a microphone
+
+  /** The relay hub: server audio in (input), one audio track out (dest), at 48 kHz. */
+  function relayHub() {
+    if (hub && hub.ctx.state !== 'closed') return hub;
+    const ctx = new AudioContext({ sampleRate: 48000 });
+    const input = new GainNode(ctx);
+    const dest = ctx.createMediaStreamDestination();
+    input.connect(dest);
+    // Inaudible dither (about -90 dBFS) between calls, so the track is never digital zeros, which
+    // Teams (and noise removers) read as a dead microphone.
+    const noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    const d = noise.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() - 0.5) * 6e-5;
+    const dither = new AudioBufferSourceNode(ctx, { buffer: noise, loop: true });
+    dither.connect(dest);
+    dither.start();
+    const resume = () => ctx.resume().catch(() => {});
+    resume();
+    // Chrome keeps an AudioContext suspended until the page has been interacted with.
+    for (const ev of ['pointerdown', 'keydown']) addEventListener(ev, resume, { capture: true });
+    hub = { ctx, input, dest };
+    return hub;
+  }
+
+  function relayAudioTrack() {
+    return relayHub().dest.stream.getAudioTracks()[0].clone();
+  }
+
+  const nativeGetUserMedia = MediaDevices.prototype.getUserMedia;
+  function relayGetUserMedia(constraints = {}) {
+    const { audio, video } = constraints || {};
+    if (!audio && !video) return nativeGetUserMedia.call(this, constraints); // let Chrome report the error
+    try {
+      const tracks = [];
+      if (audio) tracks.push(relayAudioTrack());
+      if (video) tracks.push(placeholderVideoTrack(video));
+      return Promise.resolve(new MediaStream(tracks));
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+  // On the prototype, so Teams' requests (and anything that wraps getUserMedia) get these tracks.
+  MediaDevices.prototype.getUserMedia = relayGetUserMedia;
+
   // While a sender carries server audio, Teams' own replaceTrack calls (mute, device switch) only
   // update the track we restore later, so they can't cut the server off mid-call.
   RTCRtpSender.prototype.replaceTrack = function replaceTrack(track) {
@@ -182,8 +255,60 @@
       post({ type: 'video-state', active });
     }
 
+    // ---- Self view: this computer's Teams shows what the caller sees -----------------------------
+    // Teams' own preview of "you" plays the local camera, so while the operator's camera goes out
+    // instead it would show something the caller never sees. Each such <video> is pointed at the
+    // operator's track for as long as it's sent, unmirrored like the caller's view, and given back
+    // to Teams afterwards. Checked on a timer too, since Teams re-renders it (layout or view changes).
+    const selfViews = new Map(); // <video> -> { original, ours, transform, priority }
+    let selfViewTimer = null;
+
+    function remoteTracks() {
+      const tracks = new Set();
+      for (const pc of pcs) {
+        try { pc.getReceivers().forEach(r => r.track && tracks.add(r.track)); } catch { /* closed */ }
+      }
+      return tracks;
+    }
+
+    function showSelfView() {
+      if (!operatorVideoTrack) return;
+      const remote = remoteTracks();
+      for (const v of document.querySelectorAll('video')) {
+        const entry = selfViews.get(v);
+        if (entry && v.srcObject === entry.ours) continue;
+        const tracks = v.srcObject?.getVideoTracks?.() || [];
+        // Only Teams' local preview: a video with no track that comes from the call (other people).
+        if (!tracks.length || tracks.some(t => remote.has(t) || t === operatorVideoTrack)) continue;
+        const ours = new MediaStream([operatorVideoTrack]);
+        selfViews.set(v, {
+          original: v.srcObject, // Teams' own (or a newer one it set since)
+          ours,
+          transform: entry ? entry.transform : v.style.getPropertyValue('transform'),
+          priority: entry ? entry.priority : v.style.getPropertyPriority('transform'),
+        });
+        v.srcObject = ours;
+        v.style.setProperty('transform', 'none', 'important'); // Teams mirrors its preview; the caller sees it unmirrored
+        v.play().catch(() => {});
+      }
+    }
+
+    function restoreSelfViews() {
+      clearInterval(selfViewTimer);
+      selfViewTimer = null;
+      for (const [v, { original, ours, transform, priority }] of selfViews) {
+        if (v.srcObject === ours) v.srcObject = original;
+        if (transform) v.style.setProperty('transform', transform, priority);
+        else v.style.removeProperty('transform');
+        if (v.srcObject) v.play().catch(() => {});
+      }
+      selfViews.clear();
+    }
+
     function applyVideo() {
       if (!operatorVideoTrack) return;
+      showSelfView();
+      selfViewTimer ??= setInterval(showSelfView, 500);
       for (const pc of peers) {
         const t = videoTransceiver(pc) || pc.addTransceiver('video', { direction: 'sendrecv' });
         if (!videoTransceivers.has(t.sender)) videoTransceivers.set(t.sender, { transceiver: t, originalDirection: t.direction });
@@ -218,6 +343,7 @@
       vpc?.close();
       vpc = null;
       operatorVideoTrack = null;
+      restoreSelfViews();
       // A null track alone leaves the far end showing a frozen last frame (no "track ended" signal
       // reaches it): also put the transceiver's direction back so the m-line actually goes inactive.
       for (const [sender, { transceiver, originalDirection }] of videoTransceivers) {

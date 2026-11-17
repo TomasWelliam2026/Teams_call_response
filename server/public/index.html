@@ -31,10 +31,6 @@
 
     <div id="main" hidden>
       <p id="stations" class="stations"></p>
-      <label class="check" title="Removes fans, traffic, typing and other sounds, and sends silence between your words">
-        <input type="checkbox" id="noiseFilter" checked> Remove background noise from my microphone
-      </label>
-      <p id="noiseNote" class="muted"></p>
 
       <section id="ringsSection" hidden>
         <h2>Ringing</h2>
@@ -47,13 +43,26 @@
           <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
           <div class="row">
             <button id="mute">Mute</button>
+            <button id="notHeadset" aria-pressed="false" title="Talk through the camera's microphone instead of the headset (e.g. when you take the headset off)">Not Headset</button>
             <button id="release" title="Stop hearing this call; the caller stays connected">Release</button>
             <button id="handBack" title="Stop the bridge; the person at the Teams computer gets the call back">Hand back to Teams computer</button>
             <button id="endCall" class="danger" title="Hang up the call on the Teams computer too, not just release the bridge">End call</button>
           </div>
+          <p id="micSource" class="muted"></p>
           <div class="row">
             <button id="camera" title="Send this computer's camera into the call instead of the Teams computer's">Take full control (camera)</button>
             <span id="cameraStatus" class="muted"></span>
+          </div>
+          <div class="row">
+            <label>Background
+              <select id="bgMode">
+                <option value="none">None</option>
+                <option value="blur">Blur</option>
+                <option value="inTheZone1">In The Zone</option>
+                <option value="inTheZone2">In The Zone 2</option>
+                <option value="starfieldGravJump">Starfield – Grav Jump</option>
+              </select>
+            </label>
           </div>
           <video id="cameraPreview" class="preview" autoplay muted playsinline hidden></video>
         </div>
@@ -67,6 +76,7 @@
       <p><button id="signOut" class="link">Sign out</button></p>
     </div>
   </main>
+  <script src="background-effect.js"></script>
   <script src="console.js"></script>
 </body>
 </html>
