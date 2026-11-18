@@ -37,6 +37,9 @@ let camera = null; // { pc, stream } while this computer's camera is in the call
 
 function setStatus(text) { $('status').textContent = text; }
 
+// Visible however this page is opened (an installed app window has no address bar to show it).
+$('serverAddress').textContent = `Server: ${location.host}`;
+
 /** While muted nothing from this microphone is sent (see startCall). */
 function setMuted(value) {
   muted = !!value;
@@ -402,9 +405,9 @@ function showLogin(message) {
 
 // ---- Rendering --------------------------------------------------------------------------------
 
-function render({ calls, rings: ringing = [], stations = 0, mine }) {
+function render({ calls, rings: ringing = [], stations = 0, stationList = [], mine }) {
   $('stations').textContent = stations
-    ? `Teams computer linked${stations > 1 ? ` (${stations})` : ''}.`
+    ? `Teams computer linked: ${stationList.map(s => `${s.address} (${s.client})`).join(', ')}.`
     : 'No Teams computer is linked. Calls can\'t ring here until the extension is online.';
   $('stations').dataset.ok = stations ? 'true' : 'false';
   updateRinging(ringing);

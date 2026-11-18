@@ -116,9 +116,14 @@ function ringList() {
   return [...rings.values()].map(r => ({ ringId: r.ringId, caller: r.caller, since: r.since, answering: !!r.answering }));
 }
 
-/** Tells every operator about live calls, ringing calls and how many Teams computers are linked. */
+/** The Teams computer(s) currently linked: address and client, for the operator console to show. */
+function stationList() {
+  return [...stations].map(s => ({ address: s.remote, client: s.client || 'unknown client' }));
+}
+
+/** Tells every operator about live calls, ringing calls and which Teams computers are linked. */
 function broadcastCalls() {
-  const msg = { type: 'calls', calls: callList(), rings: ringList(), stations: stations.size };
+  const msg = { type: 'calls', calls: callList(), rings: ringList(), stations: stations.size, stationList: stationList() };
   for (const op of operators) sendJson(op, { ...msg, mine: op.callId || null });
 }
 
@@ -462,6 +467,7 @@ function onStationSocket(ws) {
       clearTimeout(helloTimer);
       if (msg.type !== 'hello' || !tokenMatches(msg.token, CALL_TOKEN)) return reject(ws);
       authed = true;
+      ws.client = String(msg.client || '').slice(0, 80) || 'unknown client';
       stations.add(ws);
       sendJson(ws, { type: 'ready' });
       log(`Teams computer linked from ${ws.remote} (${msg.client || 'unknown client'}); ${stations.size} linked`);
