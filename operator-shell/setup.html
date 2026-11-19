@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Call Bridge setup</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1f1f1f;
+    --muted: #5f6368;
+    --line: #dadce0;
+    --field: #f8f9fa;
+    --accent: #188038;
+    --danger: #c5221f;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #202124;
+      --fg: #e8eaed;
+      --muted: #9aa0a6;
+      --line: #3c4043;
+      --field: #2a2b2e;
+      --accent: #34a853;
+      --danger: #f28b82;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px 18px 18px;
+    font: 13px/1.4 system-ui, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  p { color: var(--muted); }
+
+  label { display: block; margin: 10px 0 3px; }
+  input {
+    font: inherit;
+    width: 100%;
+    padding: 5px 7px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    background: var(--field);
+    color: var(--fg);
+  }
+  input:focus { border-color: var(--accent); outline: none; }
+  button {
+    font: inherit;
+    padding: 4px 8px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid var(--line);
+    background: none;
+    color: var(--fg);
+  }
+  button:hover { border-color: var(--muted); }
+
+  .secret { display: flex; gap: 6px; }
+  .secret input { flex: 1; min-width: 0; }
+
+  #error { color: var(--danger); min-height: 16px; margin-top: 6px; font-size: 12px; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; margin: 14px 0 0;
+    font-size: 12px; font-weight: 600; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+  .pill[data-state=connecting] { color: #b06000; border-color: #f9ab00; }
+  .pill[data-state=connecting] .dot { background: #f9ab00; }
+  .pill[data-state=connected] { color: var(--accent); border-color: var(--accent); }
+  .pill[data-state=connected] .dot { background: var(--accent); }
+  .pill[data-state=error], .pill[data-state=invalid] { color: var(--danger); border-color: var(--danger); }
+  .pill[data-state=error] .dot, .pill[data-state=invalid] .dot { background: var(--danger); }
+
+  .detail { margin: 8px 0 0; color: var(--muted); }
+  .detail[data-state=connected] { color: var(--accent); }
+  .detail[data-state=error], .detail[data-state=invalid] { color: var(--danger); }
+
+  .section {
+    margin-top: 20px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+  }
+  .config-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+  }
+  .config-row label { margin: 0; color: var(--fg); }
+  .config-row input[type="checkbox"] { width: 15px; height: 15px; flex: none; }
+</style>
+</head>
+<body>
+  <h1>Server connection</h1>
+  <p>Enter your Call Bridge server's address and operator token. It connects automatically.</p>
+
+  <label for="url">Server URL</label>
+  <input type="text" id="url" placeholder="https://your-server-address/" autofocus autocomplete="off" spellcheck="false">
+
+  <label for="token">Operator token</label>
+  <div class="secret">
+    <input type="password" id="token" autocomplete="off" spellcheck="false">
+    <button type="button" id="showToken" aria-pressed="false">Show</button>
+  </div>
+  <div id="error"></div>
+
+  <p class="pill" id="status" data-state="off">
+    <span class="dot"></span><span id="statusText">Not set up</span>
+  </p>
+  <p id="detail" class="detail">Enter the server URL and operator token. It connects automatically.</p>
+
+  <div class="section">
+    <h2>Configuration</h2>
+    <div class="config-row">
+      <input id="openAtLogin" type="checkbox">
+      <label for="openAtLogin">Start Call Bridge when Windows starts</label>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const STATE_LABELS = { off: 'Not set up', invalid: 'Check the URL', connecting: 'Connecting…', connected: 'Connected', error: 'Could not connect' };
+
+    let debounceTimer = null;
+    let lastAttempted = '';
+
+    function looksLikeUrl(value) {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }
+
+    function render(state, detailText) {
+      $('status').dataset.state = state;
+      $('statusText').textContent = STATE_LABELS[state];
+      $('detail').textContent = detailText;
+      $('detail').dataset.state = state;
+    }
+
+    async function attemptConnect(url, token) {
+      const key = `${url}\u0000${token}`;
+      if (key === lastAttempted) return;
+      lastAttempted = key;
+      $('error').textContent = '';
+      render('connecting', `Connecting to ${new URL(url).host}…`);
+      try {
+        await window.callBridgeSetup.save({ serverUrl: url, token });
+        render('connected', `Connected to ${new URL(url).host}.`);
+      } catch (err) {
+        render('error', 'Could not connect. Check the address and token.');
+        $('error').textContent = err?.message || 'Could not save that address.';
+      }
+    }
+
+    function scheduleConnect() {
+      clearTimeout(debounceTimer);
+      const url = $('url').value.trim();
+      const token = $('token').value.trim();
+      if (!url && !token) { render('off', 'Enter the server URL and operator token. It connects automatically.'); return; }
+      if (!looksLikeUrl(url)) { render('invalid', 'That does not look like a valid server address.'); return; }
+      if (!token) { render('off', 'Enter the operator token to finish connecting.'); return; }
+      render('connecting', 'Looks valid — connecting shortly…');
+      debounceTimer = setTimeout(() => attemptConnect(url, token), 600);
+    }
+
+    $('url').addEventListener('input', scheduleConnect);
+    $('token').addEventListener('input', scheduleConnect);
+    for (const id of ['url', 'token']) {
+      $(id).addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        clearTimeout(debounceTimer);
+        const url = $('url').value.trim();
+        const token = $('token').value.trim();
+        if (looksLikeUrl(url) && token) attemptConnect(url, token);
+      });
+    }
+
+    $('showToken').addEventListener('click', () => {
+      const show = $('token').type === 'password';
+      $('token').type = show ? 'text' : 'password';
+      $('showToken').textContent = show ? 'Hide' : 'Show';
+      $('showToken').setAttribute('aria-pressed', show);
+    });
+
+    $('openAtLogin').addEventListener('change', () => {
+      window.callBridgeSetup.setOpenAtLogin($('openAtLogin').checked);
+    });
+
+    (async () => {
+      try {
+        const config = await window.callBridgeSetup.getConfig();
+        if (config.serverUrl) $('url').value = config.serverUrl;
+        if (config.token) $('token').value = config.token;
+        $('openAtLogin').checked = !!config.openAtLogin;
+        if (config.serverUrl && config.token) {
+          lastAttempted = `${config.serverUrl}\u0000${config.token}`;
+          render('connected', `Connected to ${new URL(config.serverUrl).host}.`);
+        }
+      } catch { /* defaults are fine */ }
+    })();
+  </script>
+</body>
+</html>
