@@ -24,10 +24,16 @@
   const MAX_BACKLOG_S = 20;      // only beyond this much waiting is audio with speech in it dropped
   const QUIET_RMS = 0.004;       // a 20 ms frame quieter than this is a pause
 
+  // This page's own functions, before anything is patched. They work on objects from any frame.
   const NativePC = window.RTCPeerConnection;
   const nativeReplaceTrack = RTCRtpSender.prototype.replaceTrack;
+  const nativeTrackGetter = Object.getOwnPropertyDescriptor(RTCRtpSender.prototype, 'track').get;
+  const frameWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get;
   const pcs = new Set();
   const connectedAt = new WeakMap(); // pc -> when it first reached "connected"
+  const pcNumber = new WeakMap();    // pc -> #n in the server log, for as long as the page is open
+  const madeIn = new WeakMap();      // pc -> where Teams created it ("the page", "a helper frame (about:blank)")
+  let pcCount = 0;
   let port = null;     // MessagePort to content.js
   let options = {};    // { iceServers } for camera control, from the server
   let armed = null;    // { callId, timer, poll }
@@ -36,26 +42,134 @@
   const post = (msg, transfer) => port?.postMessage(msg, transfer || []);
 
   // ---- Track Teams' peer connections -------------------------------------------------------
+  // In this page, and in every same-origin frame that this script doesn't run in itself (about:blank,
+  // srcdoc and blob: frames, which content scripts skip): Teams can create a call's connection with
+  // such a frame's RTCPeerConnection, which a patch on this page's alone never sees.
 
-  // A Proxy (not a wrapper function) so `class X extends RTCPeerConnection` still gets X's prototype.
-  const PeerConnection = new Proxy(NativePC, {
-    construct(target, args, newTarget) {
-      const pc = Reflect.construct(target, args, newTarget);
-      pcs.add(pc);
-      pc.addEventListener('track', () => { if (armed) tryStart(); else bridge?.sync(); });
-      pc.addEventListener('connectionstatechange', () => {
-        if (pc.connectionState === 'connected' && !connectedAt.has(pc)) connectedAt.set(pc, Date.now());
-        if (armed) tryStart(); else bridge?.sync();
+  function trackConnection(pc, where) {
+    pcs.add(pc);
+    pcNumber.set(pc, ++pcCount);
+    madeIn.set(pc, where);
+    pc.addEventListener('track', () => { if (armed) tryStart(); else bridge?.sync(); });
+    pc.addEventListener('connectionstatechange', () => {
+      if (pc.connectionState === 'connected' && !connectedAt.has(pc)) connectedAt.set(pc, Date.now());
+      if (armed) tryStart(); else bridge?.sync();
+    });
+    // A connection Teams adds mid-call (moving the call to another media server) gets the bridge's
+    // audio as soon as Teams gives it a microphone, not up to a second later.
+    pc.addEventListener('negotiationneeded', () => bridge?.sync());
+    pc.addEventListener('signalingstatechange', () => bridge?.sync());
+  }
+
+  /** Patches one window (this page or a helper frame): its connections, microphone/camera requests,
+   * senders and players all go through the bridge, and so do the frames it opens. */
+  function instrument(win, where) {
+    // A Proxy (not a wrapper function) so `class X extends RTCPeerConnection` still gets X's prototype.
+    const PeerConnection = new Proxy(win.RTCPeerConnection, {
+      construct(target, args, newTarget) {
+        const pc = Reflect.construct(target, args, newTarget);
+        trackConnection(pc, where);
+        return pc;
+      },
+    });
+    win.RTCPeerConnection = PeerConnection;
+    if (win.webkitRTCPeerConnection) win.webkitRTCPeerConnection = PeerConnection;
+
+    // On the prototype, so Teams' requests (and anything that wraps getUserMedia) get the relay's
+    // tracks; see relayMedia() below.
+    const getUserMedia = win.MediaDevices.prototype.getUserMedia;
+    win.MediaDevices.prototype.getUserMedia = function (constraints = {}) {
+      return relayMedia(win, constraints, () => getUserMedia.call(this, constraints));
+    };
+
+    // While a sender carries server audio, Teams' own replaceTrack calls (mute, device switch) only
+    // update the track we restore later, so they can't cut the server off mid-call.
+    const replaceTrack = win.RTCRtpSender.prototype.replaceTrack;
+    win.RTCRtpSender.prototype.replaceTrack = function (track) {
+      if (!bridge?.owns(this)) return replaceTrack.call(this, track);
+      bridge.setOriginal(this, track);
+      return win.Promise.resolve();
+    };
+
+    // Teams checks sender.track before unmuting; finding our bridge track there instead of its own
+    // mic, it refuses ("Teams couldn't unmute"). So while bridged, Teams sees its own track. The
+    // bridge track still goes out, because it was set with the native replaceTrack.
+    const trackGetter = Object.getOwnPropertyDescriptor(win.RTCRtpSender.prototype, 'track').get;
+    Object.defineProperty(win.RTCRtpSender.prototype, 'track', {
+      configurable: true,
+      enumerable: true,
+      get() { return bridge?.owns(this) ? bridge.originalOf(this) : trackGetter.call(this); },
+    });
+
+    // Every <audio>/<video> given a stream (Teams plays the call's audio through these, attached to the
+    // page or not), so the bridge can silence this computer's speakers; see silenceSpeakers().
+    const srcObject = Object.getOwnPropertyDescriptor(win.HTMLMediaElement.prototype, 'srcObject');
+    Object.defineProperty(win.HTMLMediaElement.prototype, 'srcObject', {
+      configurable: true,
+      enumerable: true,
+      get() { return srcObject.get.call(this); },
+      set(stream) {
+        srcObject.set.call(this, stream);
+        if (!stream || ownPlayers.has(this)) return;
+        players.add(this);
+        bridge?.silenceSpeakers();
+      },
+    });
+
+    watchFrames(win);
+  }
+
+  const seenFrames = new WeakSet();    // <iframe>s already given a load listener
+  const helperWindows = new WeakSet(); // frames' windows patched from here (see hookFrame)
+
+  /** A same-origin frame this script doesn't run in gets the same patches, before Teams can use it. */
+  function hookFrame(el) {
+    if (!seenFrames.has(el)) {
+      seenFrames.add(el);
+      el.addEventListener('load', () => hookFrame(el)); // navigating (to a blob:, say) makes a new window
+    }
+    // A frame that shows a real page gets its own copy of this script (all_frames).
+    if (/^https?:/i.test(el.src) && !el.hasAttribute('srcdoc')) return;
+    try {
+      const win = frameWindow.call(el);
+      if (!win || win.__tcaPageAudio || /^https?:/i.test(win.location.href)) return;
+      win.__tcaPageAudio = true;
+      helperWindows.add(win);
+      const { protocol, href } = win.location;
+      instrument(win, `a helper frame (${protocol === 'about:' ? href : protocol.slice(0, -1)})`);
+    } catch { /* another site's frame: out of reach, and Teams can't reach into it either */ }
+  }
+
+  /** Hooks every frame `win`'s page opens: when it's inserted (Teams can use a frame's window right
+   * after), when its window is asked for, and, for frames made from HTML text, when it appears. */
+  function watchFrames(win) {
+    const scan = (node) => {
+      if (!node?.isConnected) return;
+      if (node.nodeName === 'IFRAME') hookFrame(node);
+      else if (node.nodeType === 1 && node.firstElementChild) for (const el of node.getElementsByTagName('iframe')) hookFrame(el);
+    };
+    const wrap = (proto, name) => {
+      const native = proto[name];
+      proto[name] = function (...args) {
+        const result = native.apply(this, args);
+        args.forEach(scan);
+        return result;
+      };
+    };
+    for (const name of ['appendChild', 'insertBefore', 'replaceChild']) wrap(win.Node.prototype, name);
+    for (const name of ['append', 'prepend', 'before', 'after', 'replaceWith', 'insertAdjacentElement']) wrap(win.Element.prototype, name);
+    for (const prop of ['contentWindow', 'contentDocument']) {
+      const native = Object.getOwnPropertyDescriptor(win.HTMLIFrameElement.prototype, prop).get;
+      Object.defineProperty(win.HTMLIFrameElement.prototype, prop, {
+        configurable: true,
+        enumerable: true,
+        get() { hookFrame(this); return native.call(this); },
       });
-      // A connection Teams adds mid-call (moving the call to another media server) gets the bridge's
-      // audio as soon as Teams gives it a microphone, not up to a second later.
-      pc.addEventListener('negotiationneeded', () => bridge?.sync());
-      pc.addEventListener('signalingstatechange', () => bridge?.sync());
-      return pc;
-    },
-  });
-  window.RTCPeerConnection = PeerConnection;
-  if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PeerConnection;
+    }
+    new win.MutationObserver((records) => {
+      for (const r of records) r.addedNodes.forEach(scan);
+    }).observe(win.document, { childList: true, subtree: true });
+  }
 
   // ---- Teams' media comes from the relay, not from this computer's devices --------------------
   // This computer's camera and microphones aren't used: what goes out is the server's audio and the
@@ -114,56 +228,24 @@
     return relayHub().dest.stream.getAudioTracks()[0].clone();
   }
 
-  const nativeGetUserMedia = MediaDevices.prototype.getUserMedia;
-  function relayGetUserMedia(constraints = {}) {
+  /** Teams' microphone/camera request, answered with the relay's tracks, as a stream of the asking frame. */
+  function relayMedia(win, constraints, native) {
     const { audio, video } = constraints || {};
-    if (!audio && !video) return nativeGetUserMedia.call(this, constraints); // let Chrome report the error
+    if (!audio && !video) return native(); // let Chrome report the error
     try {
       const tracks = [];
       if (audio) tracks.push(relayAudioTrack());
       if (video) tracks.push(placeholderVideoTrack(video));
-      return Promise.resolve(new MediaStream(tracks));
+      return win.Promise.resolve(new win.MediaStream(tracks));
     } catch (err) {
-      return Promise.reject(err);
+      return win.Promise.reject(err);
     }
   }
-  // On the prototype, so Teams' requests (and anything that wraps getUserMedia) get these tracks.
-  MediaDevices.prototype.getUserMedia = relayGetUserMedia;
 
-  // While a sender carries server audio, Teams' own replaceTrack calls (mute, device switch) only
-  // update the track we restore later, so they can't cut the server off mid-call.
-  RTCRtpSender.prototype.replaceTrack = function replaceTrack(track) {
-    if (!bridge?.owns(this)) return nativeReplaceTrack.call(this, track);
-    bridge.setOriginal(this, track);
-    return Promise.resolve();
-  };
-
-  // Teams checks sender.track before unmuting; finding our bridge track there instead of its own
-  // mic, it refuses ("Teams couldn't unmute"). So while bridged, Teams sees its own track. The
-  // bridge track still goes out, because it was set with the native replaceTrack.
-  const nativeTrackGetter = Object.getOwnPropertyDescriptor(RTCRtpSender.prototype, 'track').get;
-  Object.defineProperty(RTCRtpSender.prototype, 'track', {
-    configurable: true,
-    enumerable: true,
-    get() { return bridge?.owns(this) ? bridge.originalOf(this) : nativeTrackGetter.call(this); },
-  });
-
-  // Every <audio>/<video> given a stream (Teams plays the call's audio through these, attached to the
-  // page or not), so the bridge can silence this computer's speakers; see silenceSpeakers().
-  const players = new Set();
+  const players = new Set();        // Teams' <audio>/<video> elements given a stream (see instrument)
   const ownPlayers = new WeakSet(); // the receiver's own muted elements
-  const srcObjectDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'srcObject');
-  Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
-    configurable: true,
-    enumerable: true,
-    get() { return srcObjectDesc.get.call(this); },
-    set(stream) {
-      srcObjectDesc.set.call(this, stream);
-      if (!stream || ownPlayers.has(this)) return;
-      players.add(this);
-      bridge?.silenceSpeakers();
-    },
-  });
+
+  instrument(window, 'the page');
 
   const isOpen = (pc) => pc.signalingState !== 'closed' && !['closed', 'failed'].includes(pc.connectionState);
   const isConnected = (pc) => pc.connectionState === 'connected' || ['connected', 'completed'].includes(pc.iceConnectionState);
@@ -174,6 +256,8 @@
   const audioSenders = (pc) => pc.getTransceivers()
     .filter(t => t.receiver.track?.kind === 'audio' || t.sender.track?.kind === 'audio')
     .map(t => t);
+  /** How each audio channel of `pc` was last negotiated (sendrecv, sendonly, ...; null before that). */
+  const audioDirections = (pc) => audioSenders(pc).map(t => t.currentDirection);
   /** The call's video transceiver, if Teams already negotiated one (e.g. video was on, or it's a meeting). */
   const videoTransceiver = (pc) => pc.getTransceivers()
     .find(t => t.receiver.track?.kind === 'video' || t.sender.track?.kind === 'video');
@@ -241,15 +325,51 @@
       try {
         let packets = 0;
         let samples = 0;
+        const ssrcs = [];
         (await pc.getStats()).forEach((s) => {
           if (s.type !== 'inbound-rtp' || s.kind !== 'audio') return;
           packets += s.packetsReceived || 0;
           samples += s.totalSamplesReceived || 0;
+          ssrcs.push(s.ssrc);
         });
-        counts.set(pc, { packets, samples });
+        counts.set(pc, { packets, samples, ssrcs });
       } catch { /* closed */ }
     }));
     return counts;
+  }
+
+  /** For a stall report: the audio the far end last agreed to send on `pc` (direction, stream ids). */
+  function farEndAudio(pc) {
+    const sdp = pc.currentRemoteDescription?.sdp;
+    if (!sdp) return 'nothing agreed yet';
+    return sdp.split(/\r?\n(?=m=)/).filter(m => m.startsWith('m=audio')).map((m) => {
+      if (m.split(' ')[1] === '0') return 'rejected';
+      const dir = m.match(/^a=(sendrecv|sendonly|recvonly|inactive)\b/m)?.[1] || 'sendrecv';
+      const ssrcs = [...new Set([...m.matchAll(/^a=ssrc:(\d+)/gm)].map(x => x[1]))];
+      return `${dir}${ssrcs.length ? ` ssrc ${ssrcs.join('/')}` : ''}`;
+    }).join(', ') || 'no audio';
+  }
+
+  /** For a stall report: this page's frames, and whether connections made in them can be seen. */
+  function describeFrames() {
+    const list = [...document.querySelectorAll('iframe')].map((el) => {
+      let place;
+      try {
+        const url = new URL(el.src);
+        place = url.protocol === 'about:' ? el.src : url.host || url.protocol.slice(0, -1);
+      } catch {
+        place = el.hasAttribute('srcdoc') ? 'srcdoc' : 'about:blank'; // no src
+      }
+      let reach;
+      try {
+        const win = frameWindow.call(el);
+        reach = !win ? 'not loaded' : helperWindows.has(win) ? 'watched from here' : win.__tcaPageAudio ? 'own copy' : 'not watched';
+      } catch {
+        reach = 'other site, out of reach';
+      }
+      return `${place} ${reach}`;
+    });
+    return list.length ? `${list.length} (${list.slice(0, 8).join('; ')}${list.length > 8 ? '; ...' : ''})` : 'none';
   }
 
   function createBridge(callId, ignore) {
@@ -269,6 +389,7 @@
     let stalledSince = 0; // set while the caller's audio has stopped arriving (see checkStall)
     const injected = new Map(); // sender -> original track
     const peers = new Set();
+    const receiving = new Map(); // pc -> whether its audio was last negotiated to come in (see noteReceiving)
     const startedAt = Date.now();
     const watch = setInterval(checkEnded, 1000);
 
@@ -432,12 +553,29 @@
       silenceSpeakers();
       for (const pc of audioPeers()) {
         if (ignore.has(pc)) continue;
+        if (!peers.has(pc) && peers.size) post({ type: 'note', message: `Teams added connection #${pcNumber.get(pc)} to the call, made in ${madeIn.get(pc)}.` });
+        noteReceiving(pc);
         peers.add(pc);
         remoteAudio(pc).forEach(t => receiver.add(t));
         audioSenders(pc).forEach(t => inject(t, engine.outTrack, isConnected(pc)));
       }
       receiver.prune(); // closing a connection ends its tracks without an 'ended' event
       applyVideo(); // a newly-synced peer (or a late Teams video transceiver) also gets the camera
+    }
+
+    /** Writes down when Teams renegotiates a connection of the call to stop bringing in audio. */
+    function noteReceiving(pc) {
+      const dirs = audioDirections(pc);
+      const now = dirs.some(d => d === 'sendrecv' || d === 'recvonly');
+      if (receiving.get(pc) && !now) {
+        const others = [...peers].filter(p => p !== pc && audioDirections(p).some(d => d === 'sendrecv' || d === 'recvonly'));
+        post({
+          type: 'note',
+          message: `Teams stopped bringing the caller's audio in on connection #${pcNumber.get(pc)} (now ${dirs.join(', ') || 'none'}); `
+            + `${others.length ? `still coming in on ${others.map(p => `#${pcNumber.get(p)}`).join(', ')}` : 'no other connection of the call brings it in'}.`,
+        });
+      }
+      if (dirs.length) receiving.set(pc, now);
     }
 
     function checkEnded() {
@@ -460,14 +598,18 @@
       const before = await inboundAudio();
       await new Promise((r) => setTimeout(r, 1000));
       const after = await inboundAudio();
-      const connections = [...pcs].map((pc, i) => {
+      const connections = [...pcs].map((pc) => {
         const role = peers.has(pc) ? 'bridged' : ignore.has(pc) ? 'other call' : 'not bridged';
+        const dirs = audioDirections(pc).map(d => d || 'not negotiated').join(', ') || 'none';
         const tracks = pc.getReceivers().map(r => r.track).filter(t => t?.kind === 'audio')
           .map(t => `${t.readyState}${t.muted ? ' muted' : ''}${t.enabled ? '' : ' disabled'}`).join(', ') || 'none';
         const a = before.get(pc);
         const b = after.get(pc);
-        const rtp = a && b ? `${b.packets - a.packets} packets/s, ${b.samples - a.samples} samples/s` : 'no stats';
-        return `#${i + 1} ${role} ${pc.connectionState}/${pc.iceConnectionState}, audio tracks [${tracks}], ${rtp}`;
+        const rtp = a && b
+          ? `${b.packets - a.packets} packets/s, ${b.samples - a.samples} samples/s, receiving ssrc ${b.ssrcs.join('/') || 'none'}`
+          : 'no stats';
+        return `#${pcNumber.get(pc)} ${role} ${pc.connectionState}/${pc.iceConnectionState} in ${madeIn.get(pc)}, `
+          + `audio ${dirs}, far end's audio ${farEndAudio(pc)}, audio tracks [${tracks}], ${rtp}`;
       });
       const teamsPlayers = [...new Set([...players, ...document.querySelectorAll('audio, video')])]
         .filter(el => !ownPlayers.has(el) && el.srcObject?.getAudioTracks?.().length)
@@ -477,7 +619,7 @@
         type: 'note',
         message: `No audio from the caller for ${STALL_REPORT_MS / 1000} s, call still on. Page ${document.visibilityState}`
           + `${document.hasFocus() ? ' focused' : ''}. Connections: ${connections.join('; ') || 'none'}. `
-          + `Teams players: ${teamsPlayers.join(', ') || 'none'}. Reading: ${receiver.describe()}.`,
+          + `Teams players: ${teamsPlayers.join(', ') || 'none'}. Frames: ${describeFrames()}. Reading: ${receiver.describe()}.`,
       });
     }
 
