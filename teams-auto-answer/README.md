@@ -88,18 +88,25 @@ shows the app's camera, unmirrored, exactly as the other side sees it.
 ## How it works
 
 `page-audio.js` runs in Teams' own page context from the first moment, to see the WebRTC connections
-Teams creates. It does nothing until armed. Then it reads every incoming audio track
+Teams creates. Chrome runs it in every frame that shows a Teams page, but not in blank helper frames
+(about:blank, srcdoc, blob:). Teams can create a call's connection with such a frame's own
+`RTCPeerConnection`, so the script also patches every same-origin helper frame the page opens: when it's
+inserted, when its window is asked for, and again after it loads. It does nothing until armed. Then it reads every incoming audio track
 (`MediaStreamTrackProcessor`), resamples it to 16 kHz, and swaps the outgoing microphone track
 (`RTCRtpSender.replaceTrack`) for one that plays the server audio (`MediaStreamTrackGenerator`, which needs
 no click in the page), on every connection of the call, including ones Teams adds mid-call. When Teams
 moves a call to another media server, it briefly carries the same audio on two connections; the extension
 recognizes the copies by their loudness pattern and plays them once, switching to the new connection
-during a pause, so nothing is doubled or cut. What it notices is sent to the server log. If the caller's
+during a pause, so nothing is doubled or cut. What it notices is sent to the server log, including
+a connection Teams adds to the call (and where it was made) and Teams renegotiating a connection so
+that it no longer brings the caller's audio in. If the caller's
 audio stops reaching it for 2 s while the call goes on, it logs what the call's audio looks like at that
-moment: each connection's state, how many audio packets arrive and how much of them is decoded, Teams'
-players, and whether the page is in the background. Chrome hands on audio (silence, if need be) even
-when no packets arrive, so packets arriving with nothing decoded points at this browser, and no packets
-at Teams or the network.
+moment: each connection's state, where it was made, how its audio was negotiated (both ways, with the
+far end's stream ids), how many audio packets arrive and how much of them is decoded, Teams' players,
+the page's frames (and whether connections in them can be seen), and whether the page is in the
+background. Chrome hands on audio (silence, if need be) even when no packets arrive, so packets
+arriving with nothing decoded points at this browser; no packets with samples still counted, at the
+network; neither, at Teams having changed the connection.
 
 `content.js` finds ringing calls, presses Teams' buttons for the app, relays the audio to the background
 worker (which holds the WebSocket, `bridge.js`), and decides *when* to arm: a trusted press on a detected
@@ -178,6 +185,8 @@ __tcaPort.postMessage({ type: 'video-offer', callId: 'cam-test', sdp: offer.sdp 
 the caller goes silent while bridged, that the call's audio still reaches the bridge the whole time
 (50 frames a second), and that the volume comes back afterwards. The page title shows PASS or FAIL.
 `test/receiver-alone.html` checks the same flow when Teams plays the caller through no element of its own.
+`test/helper-frame.html` checks that the caller's audio keeps reaching the bridge when Teams moves it,
+mid-call, to a connection made in a blank helper frame and stops bringing it in on the first one.
 
 ## Limitations
 
