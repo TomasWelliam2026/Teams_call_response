@@ -40,6 +40,34 @@ function setStatus(text) { $('status').textContent = text; }
 // Visible however this page is opened (an installed app window has no address bar to show it).
 $('serverAddress').textContent = `Server: ${location.host}`;
 
+// ---- Always-on status --------------------------------------------------------------------------
+
+// /healthz needs no operator token, so this works even before signing in, unlike the WebSocket
+// status above and the per-station detail in #stations (which needs a live /operator connection).
+const HEALTH_POLL_MS = 5000;
+
+async function pollHealth() {
+  try {
+    const res = await fetch('/healthz');
+    if (!res.ok) throw new Error(String(res.status));
+    const health = await res.json();
+    $('serverHealth').textContent = 'Server: reachable.';
+    $('serverHealth').dataset.ok = 'true';
+    $('extensionHealth').textContent = health.teamsComputers
+      ? `Teams extension: connected${health.teamsComputers > 1 ? ` (${health.teamsComputers})` : ''}.`
+      : 'Teams extension: not connected.';
+    $('extensionHealth').dataset.ok = health.teamsComputers ? 'true' : 'false';
+  } catch {
+    $('serverHealth').textContent = 'Server: unreachable.';
+    $('serverHealth').dataset.ok = 'false';
+    $('extensionHealth').textContent = 'Teams extension: unknown (server unreachable).';
+    $('extensionHealth').dataset.ok = 'false';
+  }
+}
+
+pollHealth();
+setInterval(pollHealth, HEALTH_POLL_MS);
+
 /** While muted nothing from this microphone is sent (see startCall). */
 function setMuted(value) {
   muted = !!value;
