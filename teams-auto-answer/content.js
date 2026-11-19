@@ -216,11 +216,15 @@
   // meeting shows once its media is up: Teams' own Leave control. A third surface, confirmed live -
   // a meeting joined as a participant rather than its organizer - drops even the Leave button's
   // data-tid to "" (empty), label only, so hangupButton()'s label fallback is needed here too; this
-  // still pairs it with a second, tid-based signal that it's really a call/meeting toolbar and not
-  // some other "Leave"-labelled control elsewhere on the page, to keep a safety margin.
+  // still pairs it with a second signal that it's really a call/meeting toolbar and not some other
+  // "Leave"-labelled control elsewhere on the page, to keep a safety margin. That second signal is
+  // micButton()/cameraButton() themselves (not a raw data-tid query): this client (teams.cloud.microsoft)
+  // drops data-tid from the mic/camera buttons entirely too, down to aria-label only, and its
+  // self-view tile - and the data-tid="myself-video-more-menu" on it - only exists while the camera
+  // is on, so an audio-only call here left callUiActive() with nothing to match and never armed.
   function callUiActive() {
     if (!hangupButton()) return false;
-    return !!document.querySelector('[data-tid="microphone-button"], [data-tid="camera-button"], [data-tid="myself-video-more-menu"]');
+    return !!(micButton() || cameraButton() || document.querySelector('[data-tid="myself-video-more-menu"]'));
   }
 
   /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined.
