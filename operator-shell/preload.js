@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('callBridgeSetup', {
   save: (config) => ipcRenderer.invoke('save-config', config),
   getConfig: () => ipcRenderer.invoke('get-config'),
   setOpenAtLogin: (value) => ipcRenderer.invoke('set-open-at-login', value),
+  collapse: () => ipcRenderer.send('collapse-popup'),
 });
 
 // ---- Console page only (ring-triggered show, and settings as an overlay in the same window) -----
@@ -73,14 +74,22 @@ if (location.protocol !== 'file:') {
     document.body.appendChild(host);
     const root = host.attachShadow({ mode: 'closed' });
 
-    // A fixed-position toggle button, always visible, top-right of the window.
-    const toggle = el('button', `
-      position:fixed; top:10px; right:10px; width:30px; height:30px; pointer-events:auto;
-      border-radius:50%; border:1px solid ${line}; background:${DARK ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)'};
-      color:${fg}; display:flex; align-items:center; justify-content:center; cursor:pointer;
-      font-size:15px; font:${FONT}; transition:background .12s ease; padding:0;
-    `, { title: 'Settings', textContent: '⚙' });
-    hoverable(toggle, '', `background:${DARK ? 'rgba(255,255,255,.16)' : 'rgba(0,0,0,.12)'};`);
+    // Fixed-position buttons, always visible, top-right of the window: the window no longer hides
+    // itself on blur (see main.js), so this collapse button is the only way to fold it back to just
+    // the tray icon, and the settings gear sits next to it.
+    function cornerButton(right, titleText, text) {
+      const btn = el('button', `
+        position:fixed; top:10px; right:${right}px; width:30px; height:30px; pointer-events:auto;
+        border-radius:50%; border:1px solid ${line}; background:${DARK ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)'};
+        color:${fg}; display:flex; align-items:center; justify-content:center; cursor:pointer;
+        font-size:15px; font:${FONT}; transition:background .12s ease; padding:0;
+      `, { title: titleText, textContent: text });
+      hoverable(btn, '', `background:${DARK ? 'rgba(255,255,255,.16)' : 'rgba(0,0,0,.12)'};`);
+      return btn;
+    }
+    const collapseBtn = cornerButton(10, 'Collapse to tray icon', '↓');
+    collapseBtn.addEventListener('click', () => ipcRenderer.send('collapse-popup'));
+    const toggle = cornerButton(48, 'Settings', '⚙');
 
     const overlay = el('div', `
       position:fixed; inset:0; display:none; pointer-events:none;
@@ -146,7 +155,7 @@ if (location.protocol !== 'file:') {
 
     cardEl.append(heading, urlField.wrap, tokenField.wrap, loginRow, status, actions);
     overlay.appendChild(cardEl);
-    root.append(toggle, overlay);
+    root.append(collapseBtn, toggle, overlay);
 
     async function openSettings() {
       try {

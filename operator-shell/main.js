@@ -142,6 +142,11 @@ ipcMain.on('ring-active', (event, ringing) => {
   if (ringing && !popup.isVisible()) expand();
 });
 
+// The window used to hide itself on blur, like a normal tray popup; that's gone (see createPopup)
+// because it collapsed calls away the moment focus moved elsewhere, e.g. to click into Teams. The
+// collapse button in the console's own corner (see preload.js) is now the only way to fold it away.
+ipcMain.on('collapse-popup', () => collapse());
+
 ipcMain.handle('get-config', () => ({ serverUrl, token, openAtLogin }));
 
 ipcMain.handle('set-open-at-login', (event, value) => {
@@ -184,9 +189,6 @@ function createPopup() {
   });
 
   if (serverUrl) showConsole(); else showSetup();
-
-  // Click-away dismiss, like a normal tray popup.
-  popup.on('blur', collapse);
 }
 
 function toggleSettings() {

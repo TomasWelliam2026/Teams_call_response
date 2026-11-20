@@ -94,9 +94,15 @@
   }
   .config-row label { margin: 0; color: var(--fg); }
   .config-row input[type="checkbox"] { width: 15px; height: 15px; flex: none; }
+
+  #collapse {
+    position: fixed; top: 10px; right: 10px; width: 28px; height: 28px; padding: 0;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px;
+  }
 </style>
 </head>
 <body>
+  <button type="button" id="collapse" title="Collapse to tray icon">&#8595;</button>
   <h1>Server connection</h1>
   <p>Enter your Call Bridge server's address and operator token. It connects automatically.</p>
 
@@ -194,6 +200,8 @@
     $('openAtLogin').addEventListener('change', () => {
       window.callBridgeSetup.setOpenAtLogin($('openAtLogin').checked);
     });
+
+    $('collapse').addEventListener('click', () => window.callBridgeSetup.collapse());
 
     (async () => {
       try {
