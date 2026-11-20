@@ -165,6 +165,9 @@ function createPopup() {
     // Lives only as the tray icon — no separate taskbar button.
     skipTaskbar: true,
     autoHideMenuBar: true,
+    // Staying open on an outside click (see below) is no good if clicking that other window then
+    // buries the popup behind it: it has to actually stay on top, not just stay open.
+    alwaysOnTop: true,
     webPreferences: {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js'),
