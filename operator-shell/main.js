@@ -171,9 +171,12 @@ function createPopup() {
   // injects the token and reloads) skips entirely. Grant it here instead, and ask for it on every
   // load: without this, Notification.permission stayed 'default' forever and calls rang with nothing
   // on screen to show it.
+  // 'media' (microphone/camera) must be granted too, not just notifications: the console needs them
+  // to actually talk on a call. Denying every other permission keeps this to only what the console uses.
   popup.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
-    callback(permission === 'notifications');
+    callback(permission === 'notifications' || permission === 'media');
   });
+  popup.webContents.session.setPermissionCheckHandler((wc, permission) => permission === 'notifications' || permission === 'media');
   popup.webContents.on('did-finish-load', () => {
     popup.webContents
       .executeJavaScript("try { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch {}")
