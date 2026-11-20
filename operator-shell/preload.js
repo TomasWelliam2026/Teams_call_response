@@ -40,22 +40,27 @@ if (location.protocol !== 'file:') {
     // Built here instead of navigating to a separate settings page, so opening it never unloads the
     // console underneath: a live or ringing call stays visible and answerable while it's open.
     //
-    // Every element below is styled via its .style property, never a <style> tag or style="" markup:
-    // the server sends `Content-Security-Policy: default-src 'self'` with no style-src exception, so
-    // a <style> tag (even inside a shadow root - CSP isn't bypassed by shadow DOM) is silently
-    // dropped. That's what made the first two attempts render as unstyled, top-left, un-centered
-    // content instead of a modal - confirmed by testing in a live copy of this page before settling
-    // on this approach. CSSOM property writes (el.style.x = ...) are not subject to that restriction.
+    // Styled like a patch panel on a phone switchboard, matching setup.html: a lamp + monospace
+    // address readout instead of a plain title, monospace fields, a real toggle switch (its own child
+    // span, not a ::after - see below). Every element is styled via its .style property, never a
+    // <style> tag or style="" markup: the server sends `Content-Security-Policy: default-src 'self'`
+    // with no style-src exception, so a <style> tag (even inside a shadow root - CSP isn't bypassed by
+    // shadow DOM) is silently dropped. That's what made the first attempts render as unstyled,
+    // top-left, un-centered content instead of a modal - confirmed by testing in a live copy of this
+    // page before settling on this approach. CSSOM property writes (el.style.x = ...) are not subject
+    // to that restriction, which is also why the switch's knob is a real element, not a ::after.
     const DARK = matchMedia('(prefers-color-scheme: dark)').matches;
-    const fg = DARK ? '#e8eaed' : '#1f1f1f';
-    const muted = DARK ? '#9aa0a6' : '#5f6368';
-    const line = DARK ? '#3c4043' : '#dadce0';
-    const field = DARK ? '#2a2b2e' : '#f8f9fa';
-    const card = DARK ? '#202124' : '#ffffff';
-    const accent = DARK ? '#34a853' : '#188038';
-    const accentDark = DARK ? '#2a8a44' : '#156c2f';
-    const danger = DARK ? '#f28b82' : '#c5221f';
-    const FONT = "13px/1.45 -apple-system, 'Segoe UI', system-ui, sans-serif";
+    const fg = DARK ? '#eceeef' : '#15171a';
+    const muted = DARK ? '#868d95' : '#5b6269';
+    const line = DARK ? '#2c3036' : '#d7dbe0';
+    const field = DARK ? '#121417' : '#f4f5f7';
+    const card = DARK ? '#15171a' : '#ffffff';
+    const amber = '#e8a33d';
+    const green = DARK ? '#3fae6a' : '#1f8a4c';
+    const danger = DARK ? '#d8574b' : '#c0392b';
+    const MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    const SANS = "-apple-system, 'Segoe UI', system-ui, sans-serif";
+    const FONT = `13px/1.45 ${SANS}`;
 
     function el(tag, style, props) {
       const node = document.createElement(tag);
@@ -99,61 +104,95 @@ if (location.protocol !== 'file:') {
 
     const cardEl = el('div', `
       margin-top:54px; width:calc(100% - 40px); max-width:340px; box-sizing:border-box;
-      background:${card}; color:${fg}; border-radius:12px; border:1px solid ${line};
-      box-shadow:0 16px 40px rgba(0,0,0,.4); padding:18px 18px 16px;
+      background:${card}; color:${fg}; border:1px solid ${line};
+      box-shadow:0 16px 40px rgba(0,0,0,.45); padding:18px 18px 16px; font:${FONT};
       transform:translateY(-6px); opacity:0; transition:transform .15s ease, opacity .15s ease;
     `);
 
-    const heading = el('h2', `font:650 15px/1.3 ${FONT.split(' ').slice(1).join(' ')}; margin:0 0 14px; color:${fg};`, { textContent: 'Call Bridge settings' });
+    // Lamp + monospace address readout, same device as setup.html's status line, instead of a plain
+    // title: it reports what's actually configured, not just a label for the fields below.
+    const lamp = el('span', `width:8px; height:8px; border-radius:50%; background:${muted}; flex:none; transform:translateY(-1px); transition:background .2s ease, box-shadow .2s ease;`);
+    const hostReadout = el('span', `font:13px/1.3 ${MONO}; letter-spacing:.01em;`);
+    const readoutRow = el('div', 'display:flex; align-items:baseline; gap:9px; margin:0 0 2px;');
+    readoutRow.append(lamp, hostReadout);
+    const detail = el('div', `margin:0 0 14px 17px; color:${muted}; font-size:12px; min-height:15px;`);
+
+    function setLamp(state) {
+      const color = state === 'connected' ? green : (state === 'error' ? danger : muted);
+      lamp.style.background = color;
+      lamp.style.boxShadow = state === 'off' ? 'none' : `0 0 7px 1px ${color}b3`;
+      detail.style.color = state === 'error' ? danger : muted;
+    }
+
+    const rule1 = el('hr', `border:none; border-top:1px solid ${line}; margin:0 0 16px;`);
 
     function field_(labelText, inputType) {
       const wrap = el('div', 'margin-bottom:14px;');
-      const label = el('label', `display:block; font:600 12px/1.2 ${FONT.split(' ').slice(1).join(' ')}; color:${muted}; margin-bottom:5px;`, { textContent: labelText });
+      const label = el('label', `display:block; font-size:11.5px; color:${muted}; margin-bottom:6px;`, { textContent: labelText });
       const input = el('input', `
-        width:100%; box-sizing:border-box; padding:7px 9px; border-radius:7px;
-        border:1px solid ${line}; background:${field}; color:${fg}; font:${FONT};
+        width:100%; box-sizing:border-box; padding:8px 10px; border-radius:3px;
+        border:1px solid ${line}; background:${field}; color:${fg}; font:13px/1.3 ${MONO};
       `, { type: inputType, autocomplete: 'off', spellcheck: false });
-      input.addEventListener('focus', () => { input.style.outline = `2px solid ${accent}`; input.style.outlineOffset = '-1px'; input.style.borderColor = 'transparent'; });
-      input.addEventListener('blur', () => { input.style.outline = 'none'; input.style.borderColor = line; });
+      input.addEventListener('focus', () => { input.style.borderColor = green; });
+      input.addEventListener('blur', () => { input.style.borderColor = line; });
       wrap.append(label, input);
       return { wrap, input };
     }
 
-    const urlField = field_('Server URL', 'text');
+    const urlField = field_('Server address', 'text');
     const tokenField = field_('Operator token', 'password');
 
     const showBtn = el('button', `
-      flex:none; padding:0 12px; border-radius:7px; border:1px solid ${line};
-      background:${field}; color:${fg}; cursor:pointer; font:${FONT};
+      flex:none; padding:0 12px; border-radius:3px; border:1px solid ${line};
+      background:transparent; color:${muted}; cursor:pointer; font:12px ${SANS};
     `, { type: 'button', textContent: 'Show' });
     const tokenRow = el('div', 'display:flex; gap:6px;');
     tokenField.input.style.cssText += 'flex:1; min-width:0;';
     tokenRow.append(tokenField.input, showBtn);
     tokenField.wrap.replaceChildren(tokenField.wrap.firstChild, tokenRow);
 
-    const loginRow = el('div', 'display:flex; align-items:center; gap:8px; margin:16px 0 6px;');
-    const loginCheck = el('input', 'width:15px; height:15px; flex:none;', { type: 'checkbox', id: 'cbOpenAtLogin' });
-    const loginLabel = el('label', `font:12.5px/1.3 ${FONT.split(' ').slice(1).join(' ')}; color:${fg};`, { textContent: 'Start Call Bridge when Windows starts', htmlFor: 'cbOpenAtLogin' });
-    loginRow.append(loginCheck, loginLabel);
+    const errorLine = el('div', `color:${danger}; min-height:15px; margin:-6px 0 8px; font-size:12px;`);
 
-    const status = el('div', `min-height:16px; margin:4px 0 2px; font:${FONT};`);
+    const rule2 = el('hr', `border:none; border-top:1px solid ${line}; margin:4px 0 16px;`);
+
+    // A real toggle switch (not a checkbox): the knob is its own child span, since CSP (see above)
+    // rules out a ::after pseudo-element here.
+    const switchKnob = el('span', `
+      position:absolute; top:2px; left:2px; width:15px; height:15px; border-radius:50%;
+      background:${card}; transition:transform .15s ease;
+    `);
+    const loginSwitch = el('button', `
+      position:relative; width:34px; height:19px; flex:none; border-radius:10px;
+      background:${line}; border:none; cursor:pointer; padding:0; transition:background .15s ease;
+    `, { type: 'button', role: 'switch', 'aria-pressed': 'false' });
+    loginSwitch.appendChild(switchKnob);
+    function setSwitch(on) {
+      loginSwitch.setAttribute('aria-pressed', String(on));
+      loginSwitch.style.background = on ? green : line;
+      switchKnob.style.transform = on ? 'translateX(15px)' : 'translateX(0)';
+    }
+    const loginLabel = el('label', `font-size:12.5px; color:${fg};`, { textContent: 'Start Call Bridge when Windows starts' });
+    const loginRow = el('div', 'display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 4px;');
+    loginRow.append(loginLabel, loginSwitch);
+
+    const status = el('div', `min-height:16px; margin:14px 0 2px; font:${FONT};`);
 
     const closeBtn = el('button', `
-      padding:7px 14px; border-radius:7px; cursor:pointer; font:600 13px/1.3 ${FONT.split(' ').slice(1).join(' ')};
+      padding:7px 14px; border-radius:3px; cursor:pointer; font:600 13px/1.3 ${SANS};
       border:1px solid ${line}; background:none; color:${fg};
     `, { type: 'button', textContent: 'Close' });
     hoverable(closeBtn, '', `background:${DARK ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)'};`);
 
     const saveBtn = el('button', `
-      padding:7px 14px; border-radius:7px; cursor:pointer; font:600 13px/1.3 ${FONT.split(' ').slice(1).join(' ')};
-      border:none; background:${accent}; color:#fff;
+      padding:7px 14px; border-radius:3px; cursor:pointer; font:600 13px/1.3 ${SANS};
+      border:none; background:${green}; color:#fff;
     `, { type: 'button', textContent: 'Save' });
-    hoverable(saveBtn, '', `background:${accentDark};`);
+    hoverable(saveBtn, '', `filter:brightness(1.1);`);
 
-    const actions = el('div', 'display:flex; justify-content:flex-end; gap:8px; margin-top:16px;');
+    const actions = el('div', 'display:flex; justify-content:flex-end; gap:8px; margin-top:4px;');
     actions.append(closeBtn, saveBtn);
 
-    cardEl.append(heading, urlField.wrap, tokenField.wrap, loginRow, status, actions);
+    cardEl.append(readoutRow, detail, rule1, urlField.wrap, tokenField.wrap, errorLine, rule2, loginRow, status, actions);
     overlay.appendChild(cardEl);
     root.append(collapseBtn, toggle, overlay);
 
@@ -162,8 +201,18 @@ if (location.protocol !== 'file:') {
         const config = await ipcRenderer.invoke('get-config');
         urlField.input.value = config.serverUrl || '';
         tokenField.input.value = config.token || '';
-        loginCheck.checked = !!config.openAtLogin;
+        setSwitch(!!config.openAtLogin);
+        if (config.serverUrl) {
+          hostReadout.textContent = new URL(config.serverUrl).host;
+          setLamp('connected');
+          detail.textContent = 'Connected.';
+        } else {
+          hostReadout.textContent = '';
+          setLamp('off');
+          detail.textContent = 'Enter the server address and operator token.';
+        }
       } catch { /* leave fields blank */ }
+      errorLine.textContent = '';
       status.textContent = '';
       overlay.style.display = 'flex';
       overlay.style.pointerEvents = 'auto';
@@ -195,20 +244,28 @@ if (location.protocol !== 'file:') {
       tokenField.input.type = show ? 'text' : 'password';
       showBtn.textContent = show ? 'Hide' : 'Show';
     });
-    loginCheck.addEventListener('change', () => ipcRenderer.invoke('set-open-at-login', loginCheck.checked));
+    loginSwitch.addEventListener('click', () => {
+      const next = loginSwitch.getAttribute('aria-pressed') !== 'true';
+      setSwitch(next);
+      ipcRenderer.invoke('set-open-at-login', next);
+    });
     saveBtn.addEventListener('click', async () => {
       status.textContent = '';
+      errorLine.textContent = '';
       try {
         // Only actually navigates (dropping any live call) when the server URL changed; a token-only
         // change is saved for next reconnect so an in-progress call isn't interrupted just to look at
         // settings - see the comment on save-config in main.js.
         const result = await ipcRenderer.invoke('save-config', { serverUrl: urlField.input.value.trim(), token: tokenField.input.value.trim() });
         if (result?.reloaded) return;
-        status.style.color = accent;
+        setLamp('connected');
+        detail.textContent = 'Connected.';
+        status.style.color = green;
         status.textContent = 'Saved. The new token is used next time the app reconnects or restarts.';
       } catch (err) {
-        status.style.color = danger;
-        status.textContent = err?.message || 'Could not save.';
+        setLamp('error');
+        detail.textContent = 'Could not save.';
+        errorLine.textContent = err?.message || 'Could not save.';
       }
     });
 
