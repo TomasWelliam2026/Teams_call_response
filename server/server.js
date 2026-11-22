@@ -1,7 +1,8 @@
 // Audio bridge server for the Teams Call Answerer extension.
 //
-//   /station   The extension's always-on link: it reports which Teams calls are ringing and
-//              carries out Answer/Decline pressed in the local app.
+//   /station   The extension's always-on link: it reports which Teams calls are ringing,
+//              carries out Answer/Decline pressed in the local app, and reports problems it
+//              notices on the Teams computer (saved to logs/extension-issues.log).
 //   /call      The extension connects here after a Teams call is answered and streams it:
 //              binary PCM s16le, mono, 16 kHz, 20 ms frames, both directions.
 //   /operator  The local app (public/, installable) connects here. It shows ringing calls; Answer
@@ -451,6 +452,47 @@ function onOperatorSocket(ws) {
   });
 }
 
+// ---- Extension issues ----------------------------------------------------------------------
+// Problems the extension notices on the Teams computer, in a call or not (its own errors, a Teams
+// tab without its script, no Teams tab open), sent over /station. Each is written to
+// logs/extension-issues.log as one JSON object per line, and announced in one line of this log.
+const ISSUE_LOG = path.join(__dirname, 'logs', 'extension-issues.log');
+const ISSUE_LOG_MAX = 5 * 1024 * 1024; // then it's renamed to extension-issues.1.log (replacing that) and begun anew
+const ISSUES_PER_MINUTE = 30;          // per Teams computer; more than this in a minute are dropped
+const issueText = (value, max) => String(value ?? '').replace(/[\x00-\x09\x0b-\x1f\x7f]/g, ' ').slice(0, max);
+const issueTime = (value) => (Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : undefined);
+
+function recordIssue(ws, msg) {
+  const now = Date.now();
+  if (!ws.issues || now - ws.issues.since > 60000) ws.issues = { since: now, count: 0 };
+  if (++ws.issues.count > ISSUES_PER_MINUTE) return;
+  const count = Math.max(1, Math.min(1e9, Math.floor(Number(msg.count)) || 1));
+  const total = Math.max(count, Math.min(1e9, Math.floor(Number(msg.total)) || count));
+  const entry = {
+    time: new Date(now).toISOString(),
+    from: ws.remote,
+    client: ws.client,
+    where: issueText(msg.where, 80) || 'extension',
+    message: issueText(msg.message, 500) || 'unknown problem',
+    stack: issueText(msg.stack, 2000) || undefined,
+    count,
+    total,
+    firstSeen: issueTime(msg.firstSeen),
+    lastSeen: issueTime(msg.lastSeen),
+  };
+  try {
+    fs.mkdirSync(path.dirname(ISSUE_LOG), { recursive: true });
+    if ((fs.statSync(ISSUE_LOG, { throwIfNoEntry: false })?.size || 0) > ISSUE_LOG_MAX) {
+      fs.renameSync(ISSUE_LOG, ISSUE_LOG.replace(/\.log$/, '.1.log'));
+    }
+    fs.appendFileSync(ISSUE_LOG, `${JSON.stringify(entry)}\n`);
+  } catch (err) {
+    log(`could not save a Teams computer issue: ${err.message}`);
+  }
+  const times = total > count ? ` (${total} times so far)` : count > 1 ? ` (${count} times)` : '';
+  log(`Teams computer issue from ${ws.remote}, ${entry.where}: ${entry.message.slice(0, 200)}${times}`);
+}
+
 // ---- /station: the extension's always-on link ---------------------------------------------
 
 function onStationSocket(ws) {
@@ -487,6 +529,9 @@ function onStationSocket(ws) {
       case 'ring-ended':
         if (!rings.delete(msg.ringId)) return;
         break;
+      case 'issue':
+        recordIssue(ws, msg);
+        return;
       case 'answer-result': {
         const op = answeredBy.get(msg.ringId);
         if (!msg.ok) {
