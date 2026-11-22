@@ -1,0 +1,26 @@
+{
+  "name": "call-bridge-shell",
+  "version": "1.0.0",
+  "description": "Native Windows shell for the Call Bridge console: lives as a taskbar icon, expands into the console window when clicked.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.callbridge.shell",
+    "productName": "Call Bridge",
+    "files": ["main.js", "preload.js", "setup.html", "icon.png", "package.json"],
+    "win": {
+      "target": "portable",
+      "icon": "icon.png"
+    },
+    "directories": {
+      "output": "dist"
+    }
+  }
+}
