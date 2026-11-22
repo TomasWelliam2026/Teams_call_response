@@ -27,7 +27,41 @@
   function shutdown() {
     observer?.disconnect();
     clearInterval(poller);
+    clearInterval(issueTimer);
   }
+
+  // ---- Issues: errors in the extension's scripts here, for the server's extension-issues.log ------
+  // This frame's own (content.js, detector.js, bridge.js) and those page-audio.js passes on. The
+  // background worker sends them to the server. A repeat only adds to a count, passed on every
+  // ISSUE_FLUSH_MS, so an error in a scan that runs many times a second can't flood anything.
+  const ISSUE_FLUSH_MS = 30000;
+  const ownFiles = chrome.runtime.getURL('');
+  const issueCounts = new Map(); // "where message" -> { issue, pending }
+
+  function reportIssue({ where, message, stack, count = 1 }) {
+    const key = `${where} ${message}`;
+    const seen = issueCounts.get(key);
+    if (seen) { seen.pending += count; return; }
+    if (issueCounts.size >= 50) return;
+    issueCounts.set(key, { issue: { where, message, stack }, pending: 0 });
+    send({ type: 'issue', where, message, stack, count });
+  }
+
+  const issueTimer = setInterval(() => {
+    for (const s of issueCounts.values()) {
+      if (s.pending) { send({ type: 'issue', ...s.issue, count: s.pending }); s.pending = 0; }
+    }
+  }, ISSUE_FLUSH_MS);
+
+  const ownFile = (url) => (String(url).startsWith(ownFiles) ? String(url).slice(ownFiles.length).split(/[?#:]/)[0] : null);
+  addEventListener('error', (e) => {
+    const file = ownFile(e.filename);
+    if (file) reportIssue({ where: file, message: e.message, stack: e.error?.stack || `${file}:${e.lineno}` });
+  });
+  addEventListener('unhandledrejection', (e) => {
+    const stack = String(e.reason?.stack || '');
+    if (stack.includes(ownFiles)) reportIssue({ where: 'content.js', message: `Unhandled failure: ${e.reason?.message ?? e.reason}`, stack });
+  });
 
   function perform(call, action) {
     const btn = D.pickButton(call, action);
@@ -313,8 +347,16 @@
     syncMute(); // tells the app its (unmuted) state and unmutes Teams to match
   }
 
+  let pageAudioSeen = false; // page-audio.js answered the connect below
+
   pagePort.onmessage = ({ data }) => {
     switch (data.type) {
+      case 'hello':
+        pageAudioSeen = true;
+        break;
+      case 'issue':
+        reportIssue({ where: data.where, message: data.message, stack: data.stack, count: data.count });
+        break;
       case 'started':
         openBridge(data.callId);
         break;
@@ -342,6 +384,12 @@
     }
   };
   window.postMessage({ __tca: 'connect' }, '*', [pageChannel.port2]);
+  // page-audio.js answers at once. In the Teams tab itself it must be there, or calls can't be bridged.
+  if (window === top) {
+    setTimeout(() => {
+      if (!pageAudioSeen) reportIssue({ where: 'content.js', message: 'page-audio.js is not running in this Teams tab, so its calls can\'t be bridged. Reloading the tab should fix it.' });
+    }, 10000);
+  }
 
   // The bridge starts when a person answers: by pressing Teams' own accept button here, or by
   // clicking Answer in the local app (see 'remote-answer'), which arms it itself: the click the

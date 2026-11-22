@@ -363,7 +363,11 @@
       let reach;
       try {
         const win = frameWindow.call(el);
-        reach = !win ? 'not loaded' : helperWindows.has(win) ? 'watched from here' : win.__tcaPageAudio ? 'own copy' : 'not watched';
+        // Reading its address throws for another site's page, also one a helper frame was navigated to
+        // (the frame keeps its window object, so helperWindows alone can't tell).
+        if (!win) reach = 'not loaded';
+        else if (/^https?:/i.test(win.location.href)) reach = win.__tcaPageAudio ? 'own copy' : 'not watched';
+        else reach = helperWindows.has(win) ? 'watched from here' : 'not watched';
       } catch {
         reach = 'other site, out of reach';
       }
@@ -1050,11 +1054,50 @@
     }
   }
 
+  // ---- Issues: errors that come from this script, for the server's extension-issues.log ------------
+  // Its own, and Teams' own errors that surface inside a function it wraps (appendChild, ...): both
+  // show this file in their stack. Passed to content.js; a repeat only adds to a count, passed on
+  // every ISSUE_FLUSH_MS. Kept until content.js connects.
+  const ISSUE_FLUSH_MS = 30000;
+  const ownFile = /(?:chrome-extension|https?):\/\/[^\s()]+\/page-audio\.js/.exec(new Error().stack)?.[0] || null; // this script's address
+  const issueCounts = new Map(); // message -> { issue, pending }
+  const unsentIssues = [];
+
+  function sendIssue(issue) {
+    if (port) port.postMessage({ type: 'issue', ...issue });
+    else if (unsentIssues.length < 20) unsentIssues.push(issue);
+  }
+
+  function reportIssue(message, stack) {
+    const seen = issueCounts.get(message);
+    if (seen) { seen.pending++; return; }
+    if (issueCounts.size >= 50) return;
+    const issue = { where: 'page-audio.js', message: String(message).slice(0, 500), stack: String(stack || '').slice(0, 2000) };
+    issueCounts.set(message, { issue, pending: 0 });
+    sendIssue({ ...issue, count: 1 });
+  }
+
+  setInterval(() => {
+    for (const s of issueCounts.values()) {
+      if (s.pending) { sendIssue({ ...s.issue, count: s.pending }); s.pending = 0; }
+    }
+  }, ISSUE_FLUSH_MS);
+
+  const fromHere = (text) => !!ownFile && String(text || '').includes(ownFile);
+  window.addEventListener('error', (e) => {
+    if (fromHere(e.filename) || fromHere(e.error?.stack)) reportIssue(e.message, e.error?.stack || `${e.filename}:${e.lineno}`);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    if (fromHere(e.reason?.stack)) reportIssue(`Unhandled failure: ${e.reason?.message ?? e.reason}`, e.reason.stack);
+  });
+
   // content.js (isolated world) hands us a MessagePort; a newer one (extension reloaded) replaces the old.
   window.addEventListener('message', (e) => {
     if (e.source !== window || e.data?.__tca !== 'connect' || !e.ports[0]) return;
     port?.close();
     port = e.ports[0];
     port.onmessage = onCommand;
+    port.postMessage({ type: 'hello' });
+    unsentIssues.splice(0).forEach(sendIssue);
   });
 })();

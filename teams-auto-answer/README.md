@@ -12,6 +12,14 @@ server, so calls are answered and talked on from the **Call Bridge app** on anot
 
 It shows nothing but its connection settings: everything about calls is recorded in the server's log.
 
+**Problems are reported to the server, in a call or not.** Errors in the extension's own scripts (also
+Teams' own errors that surface inside a function the extension wraps), a Teams tab where `page-audio.js`
+isn't running, and no Teams tab open at all go over the always-on link to the server, which saves them
+in `logs/extension-issues.log` (see the server README). Each distinct problem is sent once, then how
+often it happened again at most every 10 minutes; problems wait while the server is unreachable.
+Before anything is sent, the access token, web addresses (down to the file name) and anything that
+looks like a secret are taken out.
+
 > Works with Teams **in the browser** only (teams.microsoft.com, teams.cloud.microsoft, teams.live.com).
 > The Teams desktop app can't load browser extensions.
 

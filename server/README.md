@@ -145,6 +145,11 @@ Treat both tokens like passwords. To change them, delete `.env`, run setup again
 tokens in the extension and the app.
 
 The server has no window of its own. Its logs are in `logs/` (`server.log`, `caddy.log`, `turn.log`).
+`logs/extension-issues.log` holds the problems the extension reports from the Teams computer, in a call
+or not (its own errors, a Teams tab without its script, no Teams tab open): one JSON object per line
+with the time, the Teams computer's address and version, where it happened, the message, the stack,
+and how often. Each also gets one line in `server.log` ("Teams computer issue from …"). Past 5 MB the
+file becomes `extension-issues.1.log` and starts again.
 Don't start it with `npm start` on the VPS: the services already run it with the settings from `.env`.
 
 ### Move to another VPS

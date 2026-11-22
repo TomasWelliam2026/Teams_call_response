@@ -60,6 +60,8 @@ const station = Bridge.createStation({
   onStatus: (s) => chrome.storage.session.set({ stationStatus: { ...s, time: Date.now() } }),
   onOpen: async () => {
     for (const r of Object.values(await getRings())) station.send({ type: 'ringing', ringId: r.ringId, caller: r.caller });
+    await loadIssues();
+    flushIssues();
   },
   onCommand: async (cmd) => {
     const ring = (await getRings())[cmd.ringId];
@@ -76,7 +78,95 @@ const station = Bridge.createStation({
 station.ensure();
 // The worker can be stopped while idle; the alarm brings it back and reconnects if needed.
 chrome.alarms.create('station', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === 'station') station.ensure(); });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'station') return;
+  await station.ensure();
+  await checkTeamsTab();
+  await loadIssues();
+  flushIssues();
+});
+
+// ---- Issues: problems noticed on this computer, for the server's logs/extension-issues.log -------
+// Errors in the extension's own code (here, content.js and page-audio.js, which pass theirs on) and
+// problems it can see for itself. Each distinct issue is sent once, then how often it happened again
+// at most every ISSUE_REPEAT_MS. Kept in storage.session until sent, so nothing is lost while the
+// server is unreachable or this worker is restarted. Before anything leaves, the access token,
+// addresses and anything that looks like a secret are taken out (scrub).
+const ISSUE_REPEAT_MS = 10 * 60000;
+const ISSUE_KEEP = 50; // distinct issues remembered; the oldest is forgotten
+const issues = new Map(); // "where message" -> { where, message, stack, count, sent, firstSeen, lastSeen, lastSent }
+let issuesLoaded = null;
+let issuesSaveTimer = null;
+
+function loadIssues() {
+  issuesLoaded ??= chrome.storage.session.get('issues').then(({ issues: saved = {} }) => {
+    for (const [key, issue] of Object.entries(saved)) if (!issues.has(key)) issues.set(key, issue);
+  });
+  return issuesLoaded;
+}
+
+function saveIssues() {
+  clearTimeout(issuesSaveTimer);
+  issuesSaveTimer = setTimeout(() => chrome.storage.session.set({ issues: Object.fromEntries(issues) }), 1000);
+}
+
+function scrub(text, token) {
+  if (token) text = text.split(token).join('[token]');
+  return text
+    .replace(/chrome-extension:\/\/[a-p]{32}\//g, '')                      // the extension's own files: their name
+    .replace(/https?:\/\/[^\s()'"]*\/([^/\s()'"?#]+)(?:[?#][^\s()'":]*)?/g, '$1') // other addresses: the file name only (and line)
+    .replace(/[A-Za-z0-9+/_=-]{32,}/g, '[removed]');                        // anything that could be a secret
+}
+
+/** Records one problem, or `count` more of one already known, and sends it if it's due. */
+async function reportIssue({ where, message, stack, count = 1 }) {
+  await loadIssues();
+  const { token } = await getConfig();
+  const clean = (text, max) => scrub(String(text ?? ''), token).slice(0, max);
+  const issue = { where: clean(where, 80) || 'extension', message: clean(message, 500) || 'unknown problem', stack: clean(stack, 1500) };
+  const key = `${issue.where} ${issue.message}`;
+  const now = Date.now();
+  const known = issues.get(key);
+  if (known) {
+    known.count += Math.max(1, count | 0);
+    known.lastSeen = now;
+  } else {
+    if (issues.size >= ISSUE_KEEP) issues.delete(issues.keys().next().value);
+    issues.set(key, { ...issue, count: Math.max(1, count | 0), sent: 0, firstSeen: now, lastSeen: now, lastSent: 0 });
+  }
+  flushIssues();
+}
+
+/** Sends what's new: a first sighting at once, further ones as a count every ISSUE_REPEAT_MS. */
+function flushIssues() {
+  if (station.connected) {
+    const now = Date.now();
+    for (const i of issues.values()) {
+      if (i.count === i.sent || (i.sent && now - i.lastSent < ISSUE_REPEAT_MS)) continue;
+      station.send({
+        type: 'issue', where: i.where, message: i.message, stack: i.stack,
+        count: i.count - i.sent, total: i.count, firstSeen: i.firstSeen, lastSeen: i.lastSeen,
+      });
+      i.sent = i.count;
+      i.lastSent = now;
+    }
+  }
+  saveIssues();
+}
+
+/** Calls can only ring in the app while Teams is open here. */
+async function checkTeamsTab() {
+  const { serverUrl, token } = await getConfig();
+  if (!serverUrl || !token || (await chrome.tabs.query({ url: TEAMS_URLS })).length) return;
+  await reportIssue({ where: 'background.js', message: 'No Teams tab is open in this browser, so calls can\'t ring in the app.' });
+}
+
+self.addEventListener('error', (e) => {
+  reportIssue({ where: 'background.js', message: e.message, stack: e.error?.stack || `${e.filename}:${e.lineno}` });
+});
+self.addEventListener('unhandledrejection', (e) => {
+  reportIssue({ where: 'background.js', message: `Unhandled failure: ${e.reason?.message ?? e.reason}`, stack: e.reason?.stack });
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if ((area === 'sync' && changes.serverUrl) || (area === 'local' && changes.bridgeToken)) station.ensure();
@@ -96,6 +186,9 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
           await updateRings((rings) => { delete rings[msg.ringId]; });
           station.send({ type: 'ring-ended', ringId: msg.ringId });
         }
+        break;
+      case 'issue': // from content.js: its own, or page-audio.js's
+        await reportIssue(msg);
         break;
       case 'bridge-arm':
         // Every frame gets it; the one holding the call's audio connection starts the bridge.
