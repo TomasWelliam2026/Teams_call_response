@@ -685,6 +685,10 @@ function endCall(message) {
 function setCameraButton() {
   $('camera').setAttribute('aria-pressed', !!camera);
   $('camera').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
+  // A background chosen here only ever reaches the caller through this computer's own camera (see
+  // startCamera): disabled otherwise, so picking one while Teams still carries the call doesn't look
+  // like a silent no-op.
+  $('bgMode').disabled = !camera;
 }
 
 async function startCamera() {
