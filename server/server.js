@@ -15,6 +15,8 @@
 //              plays (callers, ringtones, notifications), captured with Chrome's tab capture:
 //              binary PCM in the same format as /call.
 //   /listen    The local app's "Listen to the Teams computer": gets that tab sound, live.
+//   /dashboard Live monitoring page (public/dashboard.html + /dashboard-ws): per-call audio meters for
+//              both directions and a log of calls that have ended, kept in logs/calls.log.
 //   /healthz   Liveness check for your hosting platform.
 //
 // A call nobody has taken is handled by FALLBACK: "silence" (default) or "echo" (the caller
@@ -45,6 +47,7 @@ const STATIC = {
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
   '/background-effect.js': 'background-effect.js',
   '/background-worker.js': 'background-worker.js',
+  '/dashboard': 'dashboard.html', '/dashboard.js': 'dashboard.js', '/dashboard.css': 'dashboard.css',
   // Three of Teams' own stock backgrounds, offered as the camera's background choices.
   '/backgrounds/inTheZone1.jpg': 'backgrounds/inTheZone1.jpg',
   '/backgrounds/inTheZone2.jpg': 'backgrounds/inTheZone2.jpg',
@@ -149,13 +152,27 @@ function giveCallTo(call, op, have = null) {
   if (have !== null) account(call, 'in', replay(call.in, have, op));
 }
 
-/** One direction of a call's audio: how many frames so far, and the last HOLD_FRAMES of them. */
-const ring = (count = 0) => ({ count, frames: [] });
+/** One direction of a call's audio: how many frames so far, the last HOLD_FRAMES of them, and
+ * (for the dashboard) when the last frame arrived and how loud it was. */
+const ring = (count = 0) => ({ count, frames: [], lastAt: 0, lastLevel: null });
+
+/** Rough loudness of one PCM s16le frame, in dBFS (0 = full scale, more negative = quieter). */
+function levelDbfs(buf) {
+  const n = buf.length >> 1;
+  if (!n) return -Infinity;
+  let sum = 0;
+  for (let i = 0; i < n; i++) { const s = buf.readInt16LE(i * 2) / 32768; sum += s * s; }
+  const rms = Math.sqrt(sum / n);
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
 
 function record(r, data) {
+  const buf = Buffer.from(data);
   r.count++;
-  r.frames.push({ seq: r.count, data: Buffer.from(data) });
+  r.frames.push({ seq: r.count, data: buf });
   if (r.frames.length > HOLD_FRAMES) r.frames.shift();
+  r.lastAt = Date.now();
+  r.lastLevel = levelDbfs(buf);
 }
 
 /** Sends `ws` every frame after the first `have`; frames too old to still be held are counted as lost. */
@@ -174,6 +191,84 @@ function account(call, dir, { resent, lost }) {
   call.lost[dir] += lost;
   if (lost) log(`call ${call.id.slice(0, 8)}: ${secondsOf(lost)} of audio ${dir === 'in' ? 'from' : 'to'} the caller was too old to deliver`);
 }
+
+// ---- Dashboard: live audio status and a log of finished calls -----------------------------
+const CALL_LOG = path.join(__dirname, 'logs', 'calls.log');
+const CALL_LOG_MAX = 5 * 1024 * 1024; // then it's renamed to calls.1.log (replacing that) and begun anew
+const CALL_LOG_KEEP = 200;            // most recent finished calls kept in memory for new dashboard viewers
+const FLOW_STALE_MS = 1500;           // no frame this long: shown as stalled, not flowing
+const DASHBOARD_TICK_MS = 500;
+const callLog = []; // most recent first
+const dashboardClients = new Set();
+
+/** One direction's live status for the dashboard: is the socket up, is audio actually arriving. */
+function directionStatus(connected, r) {
+  return {
+    connected,
+    flowing: connected && Date.now() - r.lastAt < FLOW_STALE_MS,
+    dBFS: Number.isFinite(r.lastLevel) ? Math.round(r.lastLevel) : null,
+    frames: r.count,
+  };
+}
+
+function callSnapshot() {
+  return [...calls.values()].map(c => ({
+    id: c.id, caller: c.caller, startedAt: c.startedAt,
+    laptop: directionStatus(!!c.ws, c.in),   // audio coming into the server from the Teams computer
+    local: directionStatus(!!c.operator, c.out), // audio the local app is sending into the server
+  }));
+}
+
+function dashboardBroadcast(msg) {
+  if (!dashboardClients.size) return;
+  const data = JSON.stringify(msg);
+  for (const ws of dashboardClients) if (ws.readyState === ws.OPEN) ws.send(data);
+}
+
+// Every call ending writes a log line; unlike the rarer extension-issue log, this runs on the
+// audio hot path, so it must never block the event loop (no *Sync fs calls here).
+function recordCallEnded(entry) {
+  callLog.unshift(entry);
+  if (callLog.length > CALL_LOG_KEEP) callLog.length = CALL_LOG_KEEP;
+  dashboardBroadcast({ type: 'ended', entry });
+  fs.mkdir(path.dirname(CALL_LOG), { recursive: true }, (err) => {
+    if (err) return log(`could not save the call log: ${err.message}`);
+    const append = () => fs.appendFile(CALL_LOG, `${JSON.stringify(entry)}\n`, (err2) => {
+      if (err2) log(`could not save the call log: ${err2.message}`);
+    });
+    fs.stat(CALL_LOG, (err3, st) => {
+      if (!err3 && st.size > CALL_LOG_MAX) fs.rename(CALL_LOG, CALL_LOG.replace(/\.log$/, '.1.log'), append);
+      else append();
+    });
+  });
+}
+
+function onDashboardSocket(ws) {
+  let authed = false;
+  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
+
+  ws.on('message', (data, isBinary) => {
+    if (isBinary || authed) return;
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
+    clearTimeout(helloTimer);
+    authed = true;
+    dashboardClients.add(ws);
+    sendJson(ws, { type: 'init', calls: callSnapshot(), log: callLog, stations: stations.size, apps: operators.size });
+    log(`dashboard viewer connected (${ws.remote}); ${dashboardClients.size} watching`);
+  });
+
+  ws.on('close', () => {
+    clearTimeout(helloTimer);
+    if (dashboardClients.delete(ws)) log(`dashboard viewer disconnected (${ws.remote}); ${dashboardClients.size} watching`);
+  });
+}
+
+setInterval(() => {
+  if (!dashboardClients.size) return;
+  dashboardBroadcast({ type: 'tick', calls: callSnapshot(), stations: stations.size, apps: operators.size });
+}, DASHBOARD_TICK_MS);
 
 function endCall(call, reason) {
   clearTimeout(call.endTimer);
@@ -194,6 +289,11 @@ function endCall(call, reason) {
     : 'nothing lost';
   log(`call ${call.id.slice(0, 8)} ended after ${secs} s: caller -> app ${call.in.count} frames (${secondsOf(call.in.count)}), `
     + `app -> caller ${call.out.count} frames (${secondsOf(call.out.count)}), ${call.resent} re-sent after reconnects, ${lost}: ${reason}`);
+  recordCallEnded({
+    id: call.id, caller: call.caller, startedAt: call.startedAt, endedAt: Date.now(), durationSec: secs,
+    laptopFrames: call.in.count, localFrames: call.out.count, resent: call.resent,
+    lostFromLaptop: call.lost.in, lostFromLocal: call.lost.out, reason,
+  });
   broadcastCalls();
 }
 
@@ -672,12 +772,12 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
 const ROUTES = {
   '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket,
-  '/tab-sound': onTabSoundSocket, '/listen': onListenSocket,
+  '/tab-sound': onTabSoundSocket, '/listen': onListenSocket, '/dashboard-ws': onDashboardSocket,
 };
 
 const WHO = {
   '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer',
-  '/tab-sound': 'Teams tab sound', '/listen': 'Call Bridge app (listen)',
+  '/tab-sound': 'Teams tab sound', '/listen': 'Call Bridge app (listen)', '/dashboard-ws': 'dashboard viewer',
 };
 
 /** Closes a sign-in with a wrong token, and logs it so a misconfigured computer shows up in the log. */

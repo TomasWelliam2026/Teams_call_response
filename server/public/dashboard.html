@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Call Bridge — Dashboard</title>
+  <link rel="icon" href="icon-192.png">
+  <link rel="stylesheet" href="console.css">
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <main>
+    <header class="top">
+      <h1>Server dashboard</h1>
+    </header>
+    <p class="muted">Live audio status for every call in progress, and a log of calls that have ended.</p>
+    <p id="serverHealth" class="stations" role="status"></p>
+
+    <form id="login">
+      <label for="token">Operator token</label>
+      <div class="row">
+        <input type="password" id="token" autocomplete="current-password" required>
+        <button type="submit" class="primary">Connect</button>
+      </div>
+      <label class="check"><input type="checkbox" id="remember" checked> Remember on this computer</label>
+    </form>
+
+    <p id="status" class="status" role="status">Not connected.</p>
+
+    <div id="main" hidden>
+      <h2>Calls in progress (<span id="callCount">0</span>)</h2>
+      <ul id="calls" class="dash-calls"></ul>
+      <p id="noCalls" class="muted">No calls in progress.</p>
+
+      <h2>Call log</h2>
+      <table id="log" class="dash-log">
+        <thead>
+          <tr><th>Ended</th><th>Caller</th><th>Duration</th><th>Laptop → server</th><th>Local → server</th><th>Lost</th><th>Reason</th></tr>
+        </thead>
+        <tbody id="logBody"></tbody>
+      </table>
+      <p id="noLog" class="muted">No calls have ended yet.</p>
+
+      <p><button id="signOut" class="link">Sign out</button></p>
+    </div>
+  </main>
+  <script src="dashboard.js"></script>
+</body>
+</html>

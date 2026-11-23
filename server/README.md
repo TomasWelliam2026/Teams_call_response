@@ -186,6 +186,11 @@ Then put the URL `wss://<your-host>/call` in the extension's side panel. If your
 timeout, make sure it allows WebSockets. The server pings every 20 s to keep connections open.
 `GET /healthz` returns `{ ok: true, calls: n }` for health checks.
 
+`GET /dashboard` is a live monitoring page (same operator token as the console): real-time meters for
+every call in progress, one per direction — "Laptop → server" (audio arriving from the Teams computer)
+and "Local → server" (the operator app's own microphone) — plus a log of calls that have ended, kept in
+`logs/calls.log` and the last 200 in memory for new viewers.
+
 Camera control additionally needs `turn-server.js` reachable over UDP at the same hostname (see
 "Camera control" above); most container platforms don't forward arbitrary UDP ports to a container,
 so this piece is the one most likely to need a VM instead.
