@@ -10,6 +10,11 @@ server, so calls are answered and talked on from the **Call Bridge app** on anot
   place of this computer's.
 - **Mute**, **camera control** and **End call** in the app act on Teams here.
 
+**Live meter on the Teams page.** While a call is bridged, a small bar in the bottom-left corner of the
+Teams tab moves with every 20 ms frame of the Call Bridge app's audio as this extension receives it,
+with its level in dBFS and a peak marker: **Receiving** (green), **No signal** (red, nothing has arrived
+for half a second) or **Muted in the app**. It goes away when the call ends.
+
 It shows its connection settings and, during a bridged call, **Your voice**: whether the Call Bridge
 app's voice is going into the Teams call. The side panel shows the state with a level bar, and so does the
 toolbar icon's badge: **ON** (green) while the voice goes out to the caller, **MUTE** (grey) while

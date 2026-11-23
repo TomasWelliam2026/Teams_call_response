@@ -87,7 +87,96 @@
     try { bridgePort?.disconnect(); } catch { /* already gone */ }
     bridgePort = null;
     bridgeCallId = null;
+    meter.hide();
   }
+
+  // ---- Live meter: the local app's audio as it arrives here ----------------------------------
+  // A small bar on the Teams page, shown while a call is bridged, that moves with every 20 ms frame of
+  // the app's audio this extension receives: at a glance, is the app's signal getting here, and how loud.
+  const meter = (() => {
+    const NO_SIGNAL_MS = 500;   // no frame for this long: "No signal"
+    const FLOOR_DB = -60;       // the bar's empty end
+    const FALL_DB_PER_S = 30;   // how fast the bar falls after a loud frame
+    const HOLD_MS = 150;        // the bar holds a frame's level this long (frames can arrive bunched up)
+    let host = null;
+    let el = null;
+    let level = FLOOR_DB;       // shown level, dBFS
+    let peak = FLOOR_DB;        // peak hold, dBFS
+    let peakAt = 0;
+    let lastFrameAt = 0;
+    let lastDraw = 0;
+    let frame = 0;
+
+    function build() {
+      host = document.createElement('div');
+      host.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;pointer-events:none';
+      const root = host.attachShadow({ mode: 'closed' });
+      root.innerHTML = `
+        <style>
+          .box { width: 260px; padding: 8px 10px; border-radius: 8px; background: rgba(32,33,36,.92); color: #e8eaed;
+                 font: 12px/1.3 system-ui, "Segoe UI", sans-serif; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
+          .top { display: flex; justify-content: space-between; margin-bottom: 6px; }
+          .state { font-weight: 600; }
+          .state.on { color: #81c995; } .state.off { color: #f28b82; } .state.muted { color: #bdc1c6; }
+          .bar { position: relative; height: 10px; border-radius: 5px; background: #3c4043; overflow: hidden; }
+          .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: linear-gradient(90deg, #34a853 0 75%, #fbbc04 75% 90%, #ea4335 90%); background-size: 260px 100%; }
+          .peak { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; left: 0; }
+          .db { margin-top: 4px; color: #9aa0a6; font-variant-numeric: tabular-nums; }
+        </style>
+        <div class="box">
+          <div class="top"><span>Call Bridge app audio</span><span class="state">…</span></div>
+          <div class="bar"><div class="fill"></div><div class="peak"></div></div>
+          <div class="db"></div>
+        </div>`;
+      el = { state: root.querySelector('.state'), fill: root.querySelector('.fill'), peak: root.querySelector('.peak'), db: root.querySelector('.db') };
+      (document.body || document.documentElement).append(host);
+    }
+
+    const pct = (db) => `${Math.max(0, Math.min(100, ((db - FLOOR_DB) / -FLOOR_DB) * 100))}%`;
+
+    function draw(now) {
+      if (!host) return;
+      frame = requestAnimationFrame(draw);
+      const dt = lastDraw ? (now - lastDraw) / 1000 : 0;
+      lastDraw = now;
+      const receiving = performance.now() - lastFrameAt < NO_SIGNAL_MS;
+      if (!receiving) level = FLOOR_DB;
+      else if (performance.now() - lastFrameAt > HOLD_MS) level = Math.max(FLOOR_DB, level - FALL_DB_PER_S * dt);
+      if (performance.now() - peakAt > 1500) peak = Math.max(level, peak - FALL_DB_PER_S * dt);
+      el.fill.style.width = pct(level);
+      el.peak.style.left = pct(peak);
+      const [text, cls] = receiving ? ['Receiving', 'on'] : appMuted ? ['Muted in the app', 'muted'] : ['No signal', 'off'];
+      el.state.textContent = text;
+      el.state.className = `state ${cls}`;
+      el.db.textContent = receiving ? `${Math.round(level)} dBFS` : 'Nothing is arriving from the app.';
+    }
+
+    return {
+      show() {
+        if (!host) build();
+        cancelAnimationFrame(frame);
+        lastDraw = 0;
+        frame = requestAnimationFrame(draw);
+      },
+      hide() {
+        cancelAnimationFrame(frame);
+        host?.remove();
+        host = null;
+        level = peak = FLOOR_DB;
+        lastFrameAt = 0;
+      },
+      /** One 20 ms frame of the app's audio (PCM s16le), as it arrives. */
+      feed(pcm) {
+        const s = new Int16Array(pcm);
+        let sum = 0;
+        for (let i = 0; i < s.length; i++) sum += s[i] * s[i];
+        const db = sum ? 20 * Math.log10(Math.sqrt(sum / s.length) / 32768) : FLOOR_DB;
+        lastFrameAt = performance.now();
+        level = Math.max(level, db); // the bar falls (in draw) only once no louder frame came for HOLD_MS
+        if (db >= peak) { peak = db; peakAt = lastFrameAt; }
+      },
+    };
+  })();
 
   function keepFrame(pcm) {
     kept.push({ seq: ++produced, data: B.toBase64(pcm) });
@@ -257,6 +346,7 @@
     kept = [];
     produced = posted = received = 0;
     reopenSince = 0;
+    meter.show();
     connectBridge(callId);
   }
 
@@ -268,12 +358,14 @@
       pagePort.postMessage({ type: 'stop', callId, reason: 'The extension was reloaded.' });
       bridgePort = null;
       bridgeCallId = null;
+      meter.hide();
       return;
     }
     bridgePort.onMessage.addListener((msg) => {
       if (msg.type === 'audio') {
         received++;
         const pcm = B.fromBase64(msg.data);
+        meter.feed(pcm); // before it's handed over (the transfer empties it here)
         pagePort.postMessage({ type: 'audio', callId, pcm }, [pcm]);
       } else if (msg.type === 'resend') {
         posted = Math.min(msg.from, produced); // the server has frames up to here: send the rest again
@@ -304,6 +396,7 @@
       if (Date.now() - reopenSince > REOPEN_FOR_MS) {
         pagePort.postMessage({ type: 'stop', callId, reason: 'Bridge closed.' });
         bridgeCallId = null;
+        meter.hide();
         return;
       }
       setTimeout(() => { if (bridgeCallId === callId && !bridgePort) connectBridge(callId); }, 500);

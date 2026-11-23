@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Links Teams web to your Call Bridge server, so calls ring, are answered and are talked on from the Call Bridge app.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "tabs", "sidePanel", "alarms"],
