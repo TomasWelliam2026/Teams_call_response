@@ -11,6 +11,10 @@
 //              control" additionally offers a WebRTC video connection (signaled through /call and
 //              /operator as video-offer/-answer/-ice/-stop, relayed as-is below) carrying the
 //              operator's camera into the Teams call; turn-server.js is its TURN relay.
+//   /tab-sound The extension's offscreen page sends here, all the time, everything the Teams tab
+//              plays (callers, ringtones, notifications), captured with Chrome's tab capture:
+//              binary PCM in the same format as /call.
+//   /listen    The local app's "Listen to the Teams computer": gets that tab sound, live.
 //   /healthz   Liveness check for your hosting platform.
 //
 // A call nobody has taken is handled by FALLBACK: "silence" (default) or "echo" (the caller
@@ -557,6 +561,79 @@ function onStationSocket(ws) {
   });
 }
 
+// ---- /tab-sound and /listen: the Teams tab's sound, all the time ----------------------------
+// The newest /tab-sound connection is the source (a reloaded extension replaces its old one); every
+// frame from it goes to each app listening on /listen. Nothing is held or stored: an app that can't
+// keep up (a slow network) skips frames rather than falling behind.
+const TAB_SOUND_FLOWING_MS = 3000; // sound within this long counts as flowing, for /healthz
+const LISTEN_MAX_BUFFERED = 64 * 1024; // ~2 s of audio waiting to leave for one app: skip frames
+const tabSound = { source: null, lastFrameAt: 0 };
+const listeners = new Set();
+
+function tabSoundState() {
+  if (!tabSound.source) return 'off';
+  return Date.now() - tabSound.lastFrameAt < TAB_SOUND_FLOWING_MS ? 'flowing' : 'connected';
+}
+
+function onTabSoundSocket(ws) {
+  let authed = false;
+  ws.frames = 0;
+  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
+
+  ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+      if (!authed || tabSound.source !== ws) return;
+      if (!ws.frames++) log(`Teams tab sound flowing from ${ws.remote}`);
+      tabSound.lastFrameAt = Date.now();
+      for (const l of listeners) if (l.bufferedAmount < LISTEN_MAX_BUFFERED) l.send(data, { binary: true });
+      return;
+    }
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    if (authed || msg.type !== 'hello') return;
+    clearTimeout(helloTimer);
+    if (!tokenMatches(msg.token, CALL_TOKEN)) return reject(ws);
+    if (msg.format && (msg.format.sampleRate !== FORMAT.sampleRate || msg.format.encoding !== FORMAT.encoding)) {
+      sendJson(ws, { type: 'error', message: `Unsupported audio format; this server expects ${JSON.stringify(FORMAT)}.` });
+      return ws.close(CLOSE.badHello, 'format');
+    }
+    authed = true;
+    if (tabSound.source && tabSound.source !== ws) tabSound.source.close(CLOSE.replaced, 'replaced');
+    tabSound.source = ws;
+    sendJson(ws, { type: 'ready' });
+    log(`Teams tab sound connected from ${ws.remote} (${String(msg.client || 'unknown client').slice(0, 80)}); ${listeners.size} app(s) listening`);
+  });
+
+  ws.on('close', () => {
+    clearTimeout(helloTimer);
+    if (tabSound.source !== ws) return;
+    tabSound.source = null;
+    log(`Teams tab sound from ${ws.remote} stopped: ${secondsOf(ws.frames)} received on this connection`);
+  });
+}
+
+function onListenSocket(ws) {
+  let authed = false;
+  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
+
+  ws.on('message', (data, isBinary) => {
+    if (isBinary || authed) return;
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    clearTimeout(helloTimer);
+    if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
+    authed = true;
+    listeners.add(ws);
+    sendJson(ws, { type: 'ready', format: FORMAT, teamsSound: tabSoundState() });
+    log(`app listening to the Teams tab (${ws.remote}); ${listeners.size} listening`);
+  });
+
+  ws.on('close', () => {
+    clearTimeout(helloTimer);
+    if (listeners.delete(ws)) log(`app stopped listening to the Teams tab (${ws.remote}); ${listeners.size} listening`);
+  });
+}
+
 // ---- HTTP + WebSocket upgrade ------------------------------------------------------------
 
 /** Path of a request, or null for junk that URL() can't parse (scanners send things like "//"). */
@@ -568,7 +645,10 @@ const server = http.createServer((req, res) => {
   const pathname = pathOf(req.url);
   if (pathname === null) { res.writeHead(400).end('bad request'); return; }
   if (pathname === '/healthz') {
-    const health = { ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size, teamsComputers: stations.size, apps: operators.size };
+    const health = {
+      ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size,
+      teamsComputers: stations.size, apps: operators.size, teamsSound: tabSoundState(), listening: listeners.size,
+    };
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(health));
     return;
   }
@@ -590,9 +670,15 @@ const server = http.createServer((req, res) => {
 // perMessageDeflate defaults to on in `ws`; compressing every 20 ms audio frame adds CPU work and
 // jitter for no benefit (PCM doesn't compress well), which was contributing to choppy audio.
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
-const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket };
+const ROUTES = {
+  '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket,
+  '/tab-sound': onTabSoundSocket, '/listen': onListenSocket,
+};
 
-const WHO = { '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer' };
+const WHO = {
+  '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer',
+  '/tab-sound': 'Teams tab sound', '/listen': 'Call Bridge app (listen)',
+};
 
 /** Closes a sign-in with a wrong token, and logs it so a misconfigured computer shows up in the log. */
 function reject(ws) {

@@ -82,6 +82,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== 'station') return;
   await station.ensure();
   await checkTeamsTab();
+  await checkTabSound();
   await loadIssues();
   flushIssues();
 });
@@ -168,11 +169,76 @@ self.addEventListener('unhandledrejection', (e) => {
   reportIssue({ where: 'background.js', message: `Unhandled failure: ${e.reason?.message ?? e.reason}`, stack: e.reason?.stack });
 });
 
-chrome.storage.onChanged.addListener((changes, area) => {
-  if ((area === 'sync' && changes.serverUrl) || (area === 'local' && changes.bridgeToken)) station.ensure();
+// ---- Teams sound: everything the Teams tab plays, sent to the server's /tab-sound all the time ------
+// offscreen.js holds the capture and the connection. Chrome only lets a tab's sound be captured after
+// the user invoked the extension on that tab: the "Send Teams sound to the server" menu item (right-click
+// the Teams page), Alt+Shift+S there, or opening the side panel from the toolbar icon on it. After that
+// it keeps running, across Teams reloads, until Chrome or the extension restarts or the tab is closed.
+const OFFSCREEN_URL = 'offscreen.html';
+const SOUND_MENU = 'send-teams-sound';
+const SOUND_HOWTO = 'On the Teams computer, right-click the Teams page and choose "Send Teams sound to the server" (or press Alt+Shift+S there).';
+
+async function getTabSound() {
+  const { tabSound = { state: 'stopped', reason: 'Not started yet.' } } = await chrome.storage.session.get('tabSound');
+  return tabSound;
+}
+
+async function hasOffscreen() {
+  return (await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] })).length > 0;
+}
+
+/** Starts sending tab `tabId`'s sound. Returns { ok, message } for whoever asked. */
+async function startTabSound(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || !/^https:\/\/teams\.(microsoft\.com|cloud\.microsoft|live\.com)\//.test(tab.url || '')) {
+    return { ok: false, message: 'Open this on the Teams tab.' };
+  }
+  let streamId;
+  try {
+    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+  } catch (err) {
+    return { ok: false, message: `Chrome didn't allow capturing the Teams tab (${err.message}). ${SOUND_HOWTO}` };
+  }
+  if (!(await hasOffscreen())) {
+    await chrome.offscreen.createDocument({
+      url: OFFSCREEN_URL, reasons: ['USER_MEDIA'],
+      justification: 'Sends the Teams tab\'s sound to the Call Bridge server all the time.',
+    });
+  }
+  const { serverUrl, token } = await getConfig();
+  await chrome.storage.session.set({ tabSound: { state: 'connecting', reason: '', tabId, time: Date.now() } });
+  chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-sound-start', streamId, tabId, serverUrl, token }).catch(() => {});
+  return { ok: true, message: 'Sending the Teams tab\'s sound to the server.' };
+}
+
+/** Is the sound going out? If not, say so (once, then counted) in the extension's problem reports. */
+async function checkTabSound() {
+  const { serverUrl, token } = await getConfig();
+  if (!serverUrl || !token || !(await chrome.tabs.query({ url: TEAMS_URLS })).length) return;
+  const sound = await getTabSound();
+  const running = (await hasOffscreen()) && sound.state !== 'stopped';
+  if (!running) {
+    if (sound.state !== 'stopped') await chrome.storage.session.set({ tabSound: { state: 'stopped', reason: 'Chrome or the extension restarted.' } });
+    await reportIssue({ where: 'background.js', message: `The Teams tab's sound isn't being sent to the server. ${SOUND_HOWTO}` });
+  }
+}
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === SOUND_MENU && tab?.id !== undefined) startTabSound(tab.id);
+});
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'send-teams-sound' && tab?.id !== undefined) startTabSound(tab.id);
 });
 
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  if ((area === 'sync' && changes.serverUrl) || (area === 'local' && changes.bridgeToken)) {
+    station.ensure();
+    // A new server URL or token (e.g. after the tokens were replaced) reaches the running capture too.
+    if (await hasOffscreen()) chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-sound-config', ...(await getConfig()) }).catch(() => {});
+  }
+});
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
       case 'call-detected':
@@ -190,6 +256,13 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
       case 'issue': // from content.js: its own, or page-audio.js's
         await reportIssue(msg);
         break;
+      case 'tab-sound-status': // from offscreen.js
+        await chrome.storage.session.set({ tabSound: { state: msg.state, reason: msg.reason || '', tabId: msg.tabId, time: Date.now() } });
+        if (msg.state === 'stopped' && msg.reason) await reportIssue({ where: 'offscreen.js', message: `Teams sound stopped: ${msg.reason}` });
+        break;
+      case 'tab-sound-start': // from the side panel, opened on the Teams tab
+        sendResponse(await startTabSound(msg.tabId));
+        break;
       case 'bridge-arm':
         // Every frame gets it; the one holding the call's audio connection starts the bridge.
         if (sender.tab) {
@@ -198,6 +271,7 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
         break;
     }
   })();
+  return msg?.type === 'tab-sound-start'; // its answer comes later (sendResponse above)
 });
 
 // ---- Setup -------------------------------------------------------------------------------------
@@ -248,6 +322,10 @@ chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.sync.remove(OBSOLETE_SYNC);
   await chrome.storage.local.remove('log');
   await chrome.action.setBadgeText({ text: '' });
+  chrome.contextMenus.create({
+    id: SOUND_MENU, title: 'Send Teams sound to the server', contexts: ['all'], documentUrlPatterns: TEAMS_URLS,
+  }, () => void chrome.runtime.lastError); // already there after an update
+  await chrome.storage.session.remove('tabSound'); // a reload ended any capture
   await applyProvisionedConfig();
   await keepTeamsTabsAlive();
   await reloadTeamsTabs();
