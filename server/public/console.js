@@ -685,22 +685,26 @@ function endCall(message) {
 function setCameraButton() {
   $('camera').setAttribute('aria-pressed', !!camera);
   $('camera').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
+  // A background chosen here only ever reaches the caller through this computer's own camera (see
+  // startCamera): disabled otherwise, so picking one while Teams still carries the call doesn't look
+  // like a silent no-op.
+  $('bgMode').disabled = !camera;
 }
 
 async function startCamera() {
   if (!active || camera) return;
+  let raw = null, effect = null, pc = null;
   try {
-    const raw = await media.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
+    raw = await media.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
     // The background is applied here: in this mode the call carries this camera, not the Teams
     // computer's, so a background chosen in Teams itself never reaches the caller.
-    let effect = null;
     try {
       effect = await BackgroundEffect.apply(raw, background);
     } catch (err) {
       setStatus(`Background effect unavailable, sending the plain camera: ${err.message}`);
     }
     const stream = effect?.stream || raw;
-    const pc = new RTCPeerConnection({ iceServers });
+    pc = new RTCPeerConnection({ iceServers });
     camera = { pc, stream, raw, effect, callId: active.callId };
     pc.onicecandidate = (e) => ws?.send(JSON.stringify({ type: 'video-ice', callId: active.callId, candidate: e.candidate || null }));
     pc.onconnectionstatechange = () => {
@@ -709,13 +713,24 @@ async function startCamera() {
     for (const track of stream.getVideoTracks()) pc.addTransceiver(track, { direction: 'sendonly', streams: [stream] });
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('Not connected to the server.');
     ws.send(JSON.stringify({ type: 'video-offer', callId: active.callId, sdp: pc.localDescription.sdp }));
     $('cameraPreview').srcObject = stream;
     $('cameraPreview').hidden = false;
     $('cameraStatus').textContent = 'Sending this camera to the call.';
     setCameraButton();
   } catch (err) {
-    setStatus(`Camera unavailable (${err.name}): ${err.message}`);
+    // Whatever got opened above (raw track, effect, connection) must not outlive a failed start,
+    // and the button must flip back so there's still a way to notice and recover: without this, a
+    // send failing partway through (e.g. the server connection dropping) left `camera` set but the
+    // button still saying "Take full control", with the real camera still held open and no way to
+    // stop it short of reloading the page.
+    effect?.stop();
+    raw?.getTracks().forEach(t => t.stop());
+    pc?.close();
+    camera = null;
+    setCameraButton();
+    setStatus(`Camera unavailable (${err.name || 'Error'}): ${err.message}`);
   }
 }
 
