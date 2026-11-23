@@ -78,16 +78,48 @@ function renderVoice() {
   $('voiceStatus').dataset.state = v.pill;
   $('voiceText').textContent = v.label;
   $('voiceDetail').dataset.state = v.pill;
-  // Speech sits around -30..-10 dBFS: map -60..0 dBFS onto the bar.
-  const level = fresh && voice.levelDb !== null ? Math.max(0, Math.min(100, ((voice.levelDb + 60) / 60) * 100)) : 0;
-  $('voiceMeter').hidden = state === 'off';
-  $('voiceMeter').dataset.state = v.pill;
-  $('voiceLevel').style.width = `${level}%`;
-  $('voiceDetail').textContent = state === 'sending'
-    ? `${v.detail} Level ${voice.levelDb ?? '–'} dBFS, ${voice.packets ?? '–'} packets/s to the caller.`
-    : v.detail;
+  $('voiceDetail').textContent = state === 'sending' ? `${v.detail} ${voice.packets ?? '–'} packets/s to the caller.` : v.detail;
 }
 setInterval(renderVoice, 1000); // ages a report out when the call is gone
+
+// ---- Live bar: the app's audio as the extension receives it (content.js, every 50 ms) -------------
+const NO_SIGNAL_MS = 500;   // no level for this long: "No signal"
+const SHOW_FOR_MS = 5000;   // the bar stays this long after the last level (then the call is over)
+const FLOOR_DB = -60;       // the bar's empty end; speech sits around -30..-10 dBFS
+const FALL_DB_PER_S = 30;   // how fast the bar falls after a loud moment
+const HOLD_MS = 150;        // a level is held this long before the bar falls
+const PEAK_HOLD_MS = 1500;
+const live = { level: FLOOR_DB, raisedAt: 0, peak: FLOOR_DB, peakAt: 0, at: 0, lastDraw: 0 };
+const share = (db) => Math.max(0, Math.min(100, ((db - FLOOR_DB) / -FLOOR_DB) * 100));
+const pct = (db) => `${share(db)}%`;
+
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type !== 'app-level') return;
+  const now = performance.now();
+  live.at = now;
+  if (msg.db >= live.level) { live.level = msg.db; live.raisedAt = now; }
+  if (msg.db >= live.peak) { live.peak = msg.db; live.peakAt = now; }
+});
+
+function drawLive(now) {
+  requestAnimationFrame(drawLive);
+  const dt = live.lastDraw ? (now - live.lastDraw) / 1000 : 0;
+  live.lastDraw = now;
+  const since = now - live.at;
+  const inCall = (voice && Date.now() - voice.time < VOICE_STALE_MS) || (live.at && since < SHOW_FOR_MS);
+  $('liveMeter').hidden = !inCall;
+  if ($('liveMeter').hidden) return;
+  const receiving = since < NO_SIGNAL_MS;
+  if (!receiving) live.level = live.peak = FLOOR_DB;
+  else if (now - live.raisedAt > HOLD_MS) live.level = Math.max(FLOOR_DB, live.level - FALL_DB_PER_S * dt);
+  if (now - live.peakAt > PEAK_HOLD_MS) live.peak = Math.max(live.level, live.peak - FALL_DB_PER_S * dt);
+  $('liveFill').style.clipPath = `inset(0 ${100 - share(live.level)}% 0 0)`;
+  $('livePeak').style.left = pct(live.peak);
+  $('liveState').textContent = receiving ? 'Receiving' : 'No signal';
+  $('liveState').dataset.state = receiving ? 'on' : 'off';
+  $('liveDb').textContent = receiving ? `${Math.round(live.level)} dBFS` : 'Nothing is arriving from the app.';
+}
+requestAnimationFrame(drawLive);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.stationStatus) {
