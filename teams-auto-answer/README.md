@@ -20,6 +20,17 @@ often it happened again at most every 10 minutes; problems wait while the server
 Before anything is sent, the access token, web addresses (down to the file name) and anything that
 looks like a secret are taken out.
 
+**The Teams tab's sound goes to the server all the time.** Everything the Teams tab plays (callers,
+ringtones, notifications) is captured with Chrome's tab capture and sent to the server's `/tab-sound`,
+in or out of a call, so the app's **Listen to the Teams computer** can hear it live. The capture is held
+by `offscreen.html` and keeps the sound playing on this computer too. Chrome only allows capturing a tab
+after you invoked the extension on it, so start it once on the Teams tab: right-click the page and choose
+**Send Teams sound to the server**, press **Alt+Shift+S**, or open the side panel from the toolbar icon
+there (it shows whether the sound is being sent). It then keeps running across Teams reloads and token
+changes, until Chrome or the extension restarts or the tab is closed; while it isn't running, that is
+reported as a problem every few minutes. It costs about 256 kbit/s of upload, continuously. Chrome shows
+its "sharing this tab" indicator on the Teams tab while it runs.
+
 > Works with Teams **in the browser** only (teams.microsoft.com, teams.cloud.microsoft, teams.live.com).
 > The Teams desktop app can't load browser extensions.
 
@@ -148,8 +159,9 @@ short text) that mentions an incoming call ("Incoming call from …", "… is ca
 | `content.js` | Runs in Teams: reports rings, presses buttons for the app, arms the bridge, shares mute/camera, relays audio |
 | `page-audio.js` | Runs in the page's own context: reads the call's audio, swaps the mic track, answers camera-control offers |
 | `bridge.js` | WebSocket client for the server (also used by the server's tests) |
-| `background.js` | The always-on link to the server, the bridge connections, keeps Teams tabs from being put to sleep |
-| `panel.*` | Side panel: server URL, access token and connection status |
+| `background.js` | The always-on link to the server, the bridge connections, starting the Teams sound capture, keeps Teams tabs from being put to sleep |
+| `offscreen.*` | Holds the Teams tab's sound capture and sends it to the server's `/tab-sound` |
+| `panel.*` | Side panel: server URL, access token, connection and Teams sound status |
 | `test/` | A mock Teams page plus a `chrome.*` API shim for testing without Teams |
 
 ## Testing without Teams

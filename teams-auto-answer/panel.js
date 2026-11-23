@@ -60,11 +60,39 @@ $('showToken').addEventListener('click', () => {
   $('showToken').setAttribute('aria-pressed', show);
 });
 
+// ---- Teams sound (see background.js) -----------------------------------------------------------
+const SOUND_LABELS = { sending: 'Sending', connecting: 'Connecting…', stopped: 'Not sent' };
+const SOUND_PILL = { sending: 'connected', connecting: 'connecting', stopped: 'disconnected' };
+let soundNote = ''; // the answer to the last start attempt from this panel
+
+function renderSound(sound = { state: 'stopped' }) {
+  const state = SOUND_LABELS[sound.state] ? sound.state : 'stopped';
+  $('soundStatus').dataset.state = SOUND_PILL[state];
+  $('soundText').textContent = SOUND_LABELS[state];
+  $('soundDetail').textContent = state === 'sending'
+    ? 'Everything the Teams tab plays goes to the server all the time; the app can listen to it.'
+    : (sound.reason || soundNote || 'Open this panel from the toolbar icon on the Teams tab, or right-click the Teams page and choose "Send Teams sound to the server".');
+  $('soundDetail').dataset.state = SOUND_PILL[state];
+  $('sendSound').hidden = state !== 'stopped';
+}
+
+/** Chrome lets the Teams tab be captured once the extension was opened on it: try with the tab in view. */
+async function startSound() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+  const res = await chrome.runtime.sendMessage({ type: 'tab-sound-start', tabId: tab.id }).catch(() => null);
+  soundNote = res?.message || '';
+  if (!res?.ok) renderSound({ state: 'stopped', reason: soundNote });
+}
+
+$('sendSound').addEventListener('click', startSound);
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.stationStatus) {
     stationStatus = changes.stationStatus.newValue || { state: 'off' };
     render();
   }
+  if (area === 'session' && changes.tabSound) renderSound(changes.tabSound.newValue);
 });
 
 (async () => {
@@ -72,4 +100,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   $('bridgeToken').value = (await chrome.storage.local.get('bridgeToken')).bridgeToken || '';
   stationStatus = (await chrome.storage.session.get('stationStatus')).stationStatus || stationStatus;
   render();
+  const { tabSound } = await chrome.storage.session.get('tabSound');
+  renderSound(tabSound);
+  if (tabSound?.state !== 'sending' && tabSound?.state !== 'connecting') startSound();
 })();

@@ -223,6 +223,11 @@ camera, or one named like a camera. If Windows doesn't expose one (in Sound sett
 the app says so and keeps the headset. Microphones are always opened by exact device, never "any
 microphone".
 
+**Listen to the Teams computer** plays, live, everything the Teams tab on the Teams computer plays
+(callers, ringtones), whether or not a call is taken here; the line "Teams sound" at the top says whether
+it is coming in. While a call taken here brings the caller's own audio, that plays instead, so nobody is
+heard twice. The choice is remembered on this computer.
+
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
 "Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
 only needed while actually in control. **Stop camera** hands the video back; leaving the call does the same.
@@ -270,6 +275,13 @@ the client sends `{"type":"hello","role":"station","token"}`, then `{"type":"rin
 `{"type":"ring-ended","ringId"}`, `{"type":"answer-result","ringId","ok","message"}` and `{"type":"ping"}`
 every 20 s. The server sends `{"type":"answer"|"decline","ringId","mode"}`.
 A `/call` hello that carries the answered `ringId` is routed to the operator who pressed Answer.
+
+**`/tab-sound`**, the extension's capture of the whole Teams tab, all the time: the client sends
+`{"type":"hello","token","client","format"}` (`BRIDGE_TOKEN`), gets `{"type":"ready"}`, then sends binary
+frames in the `/call` format. The newest connection is the source. **`/listen`**, for the app: the client
+sends `{"type":"hello","token"}` (operator token), gets `{"type":"ready","teamsSound"}`, then receives
+those frames live; nothing is held or stored, and a listener that falls behind skips frames.
+`/healthz` reports `teamsSound` (`flowing`, `connected` or `off`) and `listening`.
 
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}` (plus `resume` and `have` to get its call back after a reconnect, see above). The server
 sends `{"type":"ready","iceServers":[…]}` then `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.
