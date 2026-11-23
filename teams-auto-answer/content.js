@@ -325,7 +325,11 @@
         // Worth knowing after the call (e.g. Teams switched media connections): goes to the server log.
         bridgePort?.postMessage({ type: 'note', message: data.message });
         break;
+      case 'voice': // once a second during a bridged call: is the app's voice going into it? (side panel, toolbar icon)
+        if (bridgeCallId === data.callId) send(data);
+        break;
       case 'stopped':
+        send({ type: 'voice', callId: data.callId, ended: true });
         if (bridgeCallId === data.callId) {
           bridgePort?.postMessage({ type: 'stop', reason: data.reason });
           closeBridgePort();

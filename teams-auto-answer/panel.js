@@ -60,10 +60,43 @@ $('showToken').addEventListener('click', () => {
   $('showToken').setAttribute('aria-pressed', show);
 });
 
+// ---- Your voice: the app's microphone going into the Teams call (see background.js showVoice) ----
+const VOICE_STALE_MS = 4000; // no report for this long: the call (or the Teams tab) is gone
+const VOICE = {
+  off: { label: 'No call', pill: 'off', detail: 'Shows here while a call is bridged to the app.' },
+  sending: { label: 'Sent to the caller', pill: 'connected', detail: 'The app\'s voice is going into the Teams call.' },
+  muted: { label: 'Muted', pill: 'connecting', detail: 'Muted (in the app or in Teams): the caller hears nothing.' },
+  waiting: { label: 'Nothing from the app', pill: 'disconnected', detail: 'No voice is arriving from the app. Is the call taken there, and is its microphone working?' },
+  blocked: { label: 'Not reaching the caller', pill: 'disconnected', detail: 'The app\'s voice arrives here, but Teams isn\'t sending it to the caller.' },
+};
+let voice = null;
+
+function renderVoice() {
+  const fresh = voice && Date.now() - voice.time < VOICE_STALE_MS;
+  const state = fresh ? voice.state : 'off';
+  const v = VOICE[state] || VOICE.off;
+  $('voiceStatus').dataset.state = v.pill;
+  $('voiceText').textContent = v.label;
+  $('voiceDetail').dataset.state = v.pill;
+  // Speech sits around -30..-10 dBFS: map -60..0 dBFS onto the bar.
+  const level = fresh && voice.levelDb !== null ? Math.max(0, Math.min(100, ((voice.levelDb + 60) / 60) * 100)) : 0;
+  $('voiceMeter').hidden = state === 'off';
+  $('voiceMeter').dataset.state = v.pill;
+  $('voiceLevel').style.width = `${level}%`;
+  $('voiceDetail').textContent = state === 'sending'
+    ? `${v.detail} Level ${voice.levelDb ?? '–'} dBFS, ${voice.packets ?? '–'} packets/s to the caller.`
+    : v.detail;
+}
+setInterval(renderVoice, 1000); // ages a report out when the call is gone
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.stationStatus) {
     stationStatus = changes.stationStatus.newValue || { state: 'off' };
     render();
+  }
+  if (area === 'session' && changes.voice) {
+    voice = changes.voice.newValue || null;
+    renderVoice();
   }
 });
 
@@ -72,4 +105,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   $('bridgeToken').value = (await chrome.storage.local.get('bridgeToken')).bridgeToken || '';
   stationStatus = (await chrome.storage.session.get('stationStatus')).stationStatus || stationStatus;
   render();
+  voice = (await chrome.storage.session.get('voice')).voice || null;
+  renderVoice();
 })();

@@ -34,6 +34,7 @@ chrome.runtime.onConnect.addListener((port) => {
         bridges.set(s.callId, { handle, tabId });
       } else if (s.state === 'ended' || s.state === 'error') {
         bridges.delete(s.callId);
+        showVoice({ type: 'voice', callId: s.callId, ended: true });
       }
     },
   });
@@ -82,9 +83,45 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if ((area === 'sync' && changes.serverUrl) || (area === 'local' && changes.bridgeToken)) station.ensure();
 });
 
+// ---- "Your voice": is the local app's voice going into the Teams call? ------------------------------
+// page-audio.js reports once a second during a bridged call (see reportVoice). Shown in the side panel
+// and on the toolbar icon: ON (green) while it goes out, MUTE (grey), ! (red) when it doesn't.
+const VOICE_BADGE = {
+  sending: { text: 'ON', color: '#188038' },
+  muted: { text: 'MUTE', color: '#5f6368' },
+  waiting: { text: '!', color: '#c5221f' },
+  blocked: { text: '!', color: '#c5221f' },
+};
+
+/** What a report means. 'waiting': nothing from the app; 'blocked': it arrives but doesn't reach the caller. */
+function voiceState(v) {
+  if (v.muted) return 'muted';
+  if (!v.received && !v.sent) return 'waiting';
+  if (!v.onCall || v.packets === 0) return 'blocked';
+  return 'sending';
+}
+
+async function showVoice(msg) {
+  const { voice: current } = await chrome.storage.session.get('voice');
+  if (msg.ended) {
+    if (current && current.callId !== msg.callId) return; // an older call's late goodbye
+    await chrome.storage.session.remove('voice');
+    await chrome.action.setBadgeText({ text: '' });
+    return;
+  }
+  const state = voiceState(msg);
+  await chrome.storage.session.set({ voice: { ...msg, state, time: Date.now() } });
+  const badge = VOICE_BADGE[state];
+  await chrome.action.setBadgeBackgroundColor({ color: badge.color });
+  await chrome.action.setBadgeText({ text: badge.text });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender) => {
   (async () => {
     switch (msg.type) {
+      case 'voice':
+        await showVoice(msg);
+        break;
       case 'call-detected':
         if (msg.ringId && sender.tab) {
           await updateRings((rings) => { rings[msg.ringId] = { ringId: msg.ringId, caller: msg.caller, tabId: sender.tab.id, since: Date.now() }; });

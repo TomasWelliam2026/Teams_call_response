@@ -10,7 +10,13 @@ server, so calls are answered and talked on from the **Call Bridge app** on anot
   place of this computer's.
 - **Mute**, **camera control** and **End call** in the app act on Teams here.
 
-It shows nothing but its connection settings: everything about calls is recorded in the server's log.
+It shows its connection settings and, during a bridged call, **Your voice**: whether the Call Bridge
+app's voice is going into the Teams call. The side panel shows the state with a level bar, and so does the
+toolbar icon's badge: **ON** (green) while the voice goes out to the caller, **MUTE** (grey) while
+muted, **!** (red) when nothing arrives from the app, or when it arrives but Teams sends no audio
+packets to the caller. page-audio.js measures it once a second: the app's frames that arrived, those
+written into the call's outgoing track, their loudness, and the audio packets that track's sender sent.
+Everything else about calls is recorded in the server's log.
 
 > Works with Teams **in the browser** only (teams.microsoft.com, teams.cloud.microsoft, teams.live.com).
 > The Teams desktop app can't load browser extensions.
@@ -141,7 +147,7 @@ short text) that mentions an incoming call ("Incoming call from …", "… is ca
 | `page-audio.js` | Runs in the page's own context: reads the call's audio, swaps the mic track, answers camera-control offers |
 | `bridge.js` | WebSocket client for the server (also used by the server's tests) |
 | `background.js` | The always-on link to the server, the bridge connections, keeps Teams tabs from being put to sleep |
-| `panel.*` | Side panel: server URL, access token and connection status |
+| `panel.*` | Side panel: server URL, access token, connection status and "Your voice" |
 | `test/` | A mock Teams page plus a `chrome.*` API shim for testing without Teams |
 
 ## Testing without Teams

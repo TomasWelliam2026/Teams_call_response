@@ -28,6 +28,7 @@
   const NativePC = window.RTCPeerConnection;
   const nativeReplaceTrack = RTCRtpSender.prototype.replaceTrack;
   const nativeTrackGetter = Object.getOwnPropertyDescriptor(RTCRtpSender.prototype, 'track').get;
+  const nativeSenderStats = RTCRtpSender.prototype.getStats;
   const frameWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow').get;
   const pcs = new Set();
   const connectedAt = new WeakMap(); // pc -> when it first reached "connected"
@@ -317,6 +318,7 @@
   // ---- The bridge: one answered call ------------------------------------------------------
 
   const STALL_REPORT_MS = 2000; // the caller's audio stopped this long with the call still on: report it (checkStall)
+  const VOICE_REPORT_MS = 1000; // how often the "Your voice" indicator is updated (reportVoice)
 
   /** Incoming audio packets and decoded samples so far, per connection (getStats). */
   async function inboundAudio() {
@@ -392,6 +394,30 @@
     const receiving = new Map(); // pc -> whether its audio was last negotiated to come in (see noteReceiving)
     const startedAt = Date.now();
     const watch = setInterval(checkEnded, 1000);
+    const voiceTimer = setInterval(reportVoice, VOICE_REPORT_MS);
+    let lastPacketsSent = null;
+
+    /**
+     * Once a second, for the extension's "Your voice" indicator: how much of the app's voice arrived,
+     * how much went into the call's outgoing track (not while muted) and how loud, whether that track
+     * is on the call's audio sender, and how many audio packets that sender actually sent to the caller.
+     */
+    async function reportVoice() {
+      const s = engine.takeStats();
+      const senders = [...injected.keys()].filter(snd => nativeTrackGetter.call(snd) === engine.outTrack);
+      let packets = 0;
+      await Promise.all(senders.map(async (snd) => {
+        try {
+          (await nativeSenderStats.call(snd)).forEach((r) => { if (r.type === 'outbound-rtp') packets += r.packetsSent || 0; });
+        } catch { /* the call is closing */ }
+      }));
+      const packetsPerS = lastPacketsSent === null || !senders.length ? null : packets - lastPacketsSent;
+      lastPacketsSent = senders.length ? packets : null;
+      post({
+        type: 'voice', callId, received: s.received, sent: s.sent, muted: engine.muted, onCall: senders.length > 0,
+        packets: packetsPerS, levelDb: s.peak > 0 ? Math.round(20 * Math.log10(s.peak)) : null,
+      });
+    }
 
     /** Swaps `transceiver`'s outgoing track for `outTrack` (defaults to the audio engine's). Kind-agnostic:
      * also used for the operator's camera (see startVideo below), which just passes a video track.
@@ -628,6 +654,7 @@
       if (stopped) return;
       stopped = true;
       clearInterval(watch);
+      clearInterval(voiceTimer);
       if (bridge === self) bridge = null;
       restoreSpeakers();
       stopVideo();
@@ -931,6 +958,15 @@
     let startedAt = 0;
     let written = 0;   // frames
     let timestamp = 0; // µs, must only grow
+    // For the voice indicator (see reportVoice): since the last takeStats(), frames of the app's voice
+    // that arrived, frames of it that went into the track, and the loudest of those (RMS).
+    const stats = { received: 0, sent: 0, peak: 0 };
+
+    function rmsOf(f) {
+      let sum = 0;
+      for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
+      return Math.sqrt(sum / f.length);
+    }
 
     function write(f) {
       const data = new AudioData({ format: 'f32-planar', sampleRate: RATE, numberOfFrames: f.length, numberOfChannels: 1, timestamp, data: f });
@@ -945,6 +981,7 @@
       if (due > 50) { written += due - 50; due = 50; } // the page was frozen: don't flood the call afterwards
       for (; due > 0; due--, written++) {
         const f = queue.next();
+        if (f && !muted) { stats.sent++; stats.peak = Math.max(stats.peak, rmsOf(f)); }
         write(!f || muted ? silence : f);
       }
     }
@@ -952,9 +989,15 @@
 
     return {
       outTrack: generator,
-      play(pcm) { queue.push(toFloat(pcm)); },
+      play(pcm) { stats.received++; queue.push(toFloat(pcm)); },
       tick,
       setMuted(value) { muted = value; },
+      get muted() { return muted; },
+      takeStats() {
+        const s = { ...stats };
+        Object.assign(stats, { received: 0, sent: 0, peak: 0 });
+        return s;
+      },
       close() {
         clearInterval(timer);
         writer.close().catch(() => {});
