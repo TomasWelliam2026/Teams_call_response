@@ -82,6 +82,20 @@
       return relayMedia(win, constraints, () => getUserMedia.call(this, constraints));
     };
 
+    // A VPS with no real camera/mic reports zero devices here, a separate signal from getUserMedia
+    // that Teams also uses (device picker, "no microphone found" UI). Report one fake mic and camera
+    // so Teams treats this like a normal computer, same as the relay already does for getUserMedia.
+    const enumerateDevices = win.MediaDevices.prototype.enumerateDevices;
+    win.MediaDevices.prototype.enumerateDevices = function () {
+      return enumerateDevices.call(this).then((devices) => {
+        if (devices.some((d) => d.kind === 'audioinput') && devices.some((d) => d.kind === 'videoinput')) return devices;
+        const fake = [...devices];
+        if (!devices.some((d) => d.kind === 'audioinput')) fake.push(fakeDevice('audioinput'));
+        if (!devices.some((d) => d.kind === 'videoinput')) fake.push(fakeDevice('videoinput'));
+        return fake;
+      });
+    };
+
     // While a sender carries server audio, Teams' own replaceTrack calls (mute, device switch) only
     // update the track we restore later, so they can't cut the server off mid-call.
     const replaceTrack = win.RTCRtpSender.prototype.replaceTrack;
@@ -181,6 +195,17 @@
   //  - Video: black placeholder frames, replaced on Teams' sender by the Call Bridge app's camera.
   // Teams always gets an answer at once, so it always sets up sending audio and video.
   const placeholderTracks = new Set();
+
+  /** A MediaDeviceInfo-shaped stand-in for enumerateDevices() on hardware with no real device. */
+  function fakeDevice(kind) {
+    return {
+      kind,
+      deviceId: `tca-${kind}`,
+      groupId: `tca-${kind}`,
+      label: '',
+      toJSON() { return { kind: this.kind, deviceId: this.deviceId, groupId: this.groupId, label: this.label }; },
+    };
+  }
 
   function placeholderVideoTrack(video) {
     const want = typeof video === 'object' ? video : {};
