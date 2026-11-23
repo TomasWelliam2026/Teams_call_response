@@ -33,9 +33,16 @@ h1 { font-size: 15px; margin: 0 0 4px; }
 h1:not(:first-child) { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); }
 .hint { margin: 0; color: var(--muted); }
 
-.meter { height: 8px; margin: 10px 0 0; border-radius: 4px; background: var(--field); border: 1px solid var(--line); overflow: hidden; }
-.meter div { height: 100%; width: 0; background: var(--accent); transition: width 0.3s; }
-.meter[data-state=disconnected] div { background: var(--danger); }
+.live { margin: 12px 0 0; }
+.live-top { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.live-state { font-weight: 600; }
+.live-state[data-state=on] { color: var(--accent); }
+.live-state[data-state=off] { color: var(--danger); }
+.meter { position: relative; height: 12px; border-radius: 6px; background: var(--field); border: 1px solid var(--line); overflow: hidden; }
+/* Green for speech, yellow when loud, red near clipping (-60..0 dBFS across the bar). */
+.meter div { position: absolute; inset: 0; clip-path: inset(0 100% 0 0); background: linear-gradient(90deg, #34a853 0 75%, #fbbc04 75% 90%, #ea4335 90%); }
+.meter span { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--fg); }
+.live-db { margin-top: 3px; color: var(--muted); font-variant-numeric: tabular-nums; }
 
 label { display: block; margin: 10px 0 3px; }
 input {

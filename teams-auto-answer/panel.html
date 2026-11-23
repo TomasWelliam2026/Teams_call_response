@@ -26,7 +26,11 @@
   <p class="pill" id="voiceStatus" data-state="off" role="status">
     <span class="dot"></span><span id="voiceText">No call</span>
   </p>
-  <div class="meter" id="voiceMeter" hidden><div id="voiceLevel"></div></div>
+  <div class="live" id="liveMeter" hidden>
+    <div class="live-top"><span>App audio received</span><span id="liveState" class="live-state">…</span></div>
+    <div class="meter"><div id="liveFill"></div><span id="livePeak"></span></div>
+    <div id="liveDb" class="live-db"></div>
+  </div>
   <p id="voiceDetail" class="detail">Shows here while a call is bridged to the app.</p>
 
   <script src="bridge.js"></script>
