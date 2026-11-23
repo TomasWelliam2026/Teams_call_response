@@ -20,7 +20,7 @@
 // WebRTC signaling details live only in page-audio.js (page world) and console.js (operator app).
 (() => {
   const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1, frameMs: 20 };
-  const CLIENT = 'teams-call-answerer/0.7.0';
+  const CLIENT = 'teams-call-answerer/0.6.5';
   const RECONNECT_FOR_MS = 60000;  // keep reconnecting this long after the connection drops mid-call (the server holds the call as long)
   const HELLO_TIMEOUT_MS = 8000;
   const STUCK_BUFFERED = 1024 * 1024; // ~30 s of audio not leaving: treat the connection as dead and reconnect
@@ -41,7 +41,7 @@
   }
 
   /**
-   * The server's WebSocket address for `path` ('/call', '/station' or '/tab-sound'), from the Server URL as typed:
+   * The server's WebSocket address for `path` ('/call' or '/station'), from the Server URL as typed:
    * wss://host/call, wss://host, wss://host/ and https://host all lead to the same server. Without
    * this, "wss://host/" became "wss://host//station" and "wss://host/" for calls, which the server
    * doesn't serve, so nothing rang and no audio got through.
@@ -50,7 +50,7 @@
     const u = new URL(url);
     if (u.protocol === 'https:') u.protocol = 'wss:';
     if (u.protocol === 'http:') u.protocol = 'ws:';
-    u.pathname = u.pathname.replace(/\/+(call|station|operator|tab-sound)?\/*$/, '') + path;
+    u.pathname = u.pathname.replace(/\/+(call|station|operator)?\/*$/, '') + path;
     u.search = '';
     u.hash = '';
     return u.href;
@@ -231,7 +231,6 @@
    * (which also keeps the extension's service worker awake).
    *   extension -> server  {type:'hello', role:'station', token, client} | {type:'ringing', ringId, caller}
    *                        | {type:'ring-ended', ringId} | {type:'answer-result', ringId, ok, message} | {type:'ping'}
-   *                        | {type:'issue', where, message, stack, count, total, firstSeen, lastSeen}
    *   server -> extension  {type:'ready'} | {type:'answer'|'decline', ringId, mode} | {type:'pong'}
    * getConfig() -> { serverUrl, token, enabled }; onOpen() is called after each (re)connect so the caller
    * can re-announce calls that are still ringing; onStatus({ state, reason }) reports
@@ -298,5 +297,5 @@
     return { ensure, send, close: teardown, get connected() { return ready; } };
   }
 
-  globalThis.TeamsCallBridge = { FORMAT, CLIENT, endpoint, toBase64, fromBase64, checkServerUrl, serveBridgePort, testServer, createStation };
+  globalThis.TeamsCallBridge = { FORMAT, toBase64, fromBase64, checkServerUrl, serveBridgePort, testServer, createStation };
 })();

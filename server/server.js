@@ -1,8 +1,7 @@
 // Audio bridge server for the Teams Call Answerer extension.
 //
-//   /station   The extension's always-on link: it reports which Teams calls are ringing,
-//              carries out Answer/Decline pressed in the local app, and reports problems it
-//              notices on the Teams computer (saved to logs/extension-issues.log).
+//   /station   The extension's always-on link: it reports which Teams calls are ringing and
+//              carries out Answer/Decline pressed in the local app.
 //   /call      The extension connects here after a Teams call is answered and streams it:
 //              binary PCM s16le, mono, 16 kHz, 20 ms frames, both directions.
 //   /operator  The local app (public/, installable) connects here. It shows ringing calls; Answer
@@ -11,12 +10,6 @@
 //              control" additionally offers a WebRTC video connection (signaled through /call and
 //              /operator as video-offer/-answer/-ice/-stop, relayed as-is below) carrying the
 //              operator's camera into the Teams call; turn-server.js is its TURN relay.
-//   /tab-sound The extension's offscreen page sends here, all the time, everything the Teams tab
-//              plays (callers, ringtones, notifications), captured with Chrome's tab capture:
-//              binary PCM in the same format as /call.
-//   /listen    The local app's "Listen to the Teams computer": gets that tab sound, live.
-//   /dashboard Live monitoring page (public/dashboard.html + /dashboard-ws): per-call audio meters for
-//              both directions and a log of calls that have ended, kept in logs/calls.log.
 //   /healthz   Liveness check for your hosting platform.
 //
 // A call nobody has taken is handled by FALLBACK: "silence" (default) or "echo" (the caller
@@ -47,7 +40,6 @@ const STATIC = {
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
   '/background-effect.js': 'background-effect.js',
   '/background-worker.js': 'background-worker.js',
-  '/dashboard': 'dashboard.html', '/dashboard.js': 'dashboard.js', '/dashboard.css': 'dashboard.css',
   // Three of Teams' own stock backgrounds, offered as the camera's background choices.
   '/backgrounds/inTheZone1.jpg': 'backgrounds/inTheZone1.jpg',
   '/backgrounds/inTheZone2.jpg': 'backgrounds/inTheZone2.jpg',
@@ -152,27 +144,13 @@ function giveCallTo(call, op, have = null) {
   if (have !== null) account(call, 'in', replay(call.in, have, op));
 }
 
-/** One direction of a call's audio: how many frames so far, the last HOLD_FRAMES of them, and
- * (for the dashboard) when the last frame arrived and how loud it was. */
-const ring = (count = 0) => ({ count, frames: [], lastAt: 0, lastLevel: null });
-
-/** Rough loudness of one PCM s16le frame, in dBFS (0 = full scale, more negative = quieter). */
-function levelDbfs(buf) {
-  const n = buf.length >> 1;
-  if (!n) return -Infinity;
-  let sum = 0;
-  for (let i = 0; i < n; i++) { const s = buf.readInt16LE(i * 2) / 32768; sum += s * s; }
-  const rms = Math.sqrt(sum / n);
-  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
-}
+/** One direction of a call's audio: how many frames so far, and the last HOLD_FRAMES of them. */
+const ring = (count = 0) => ({ count, frames: [] });
 
 function record(r, data) {
-  const buf = Buffer.from(data);
   r.count++;
-  r.frames.push({ seq: r.count, data: buf });
+  r.frames.push({ seq: r.count, data: Buffer.from(data) });
   if (r.frames.length > HOLD_FRAMES) r.frames.shift();
-  r.lastAt = Date.now();
-  r.lastLevel = levelDbfs(buf);
 }
 
 /** Sends `ws` every frame after the first `have`; frames too old to still be held are counted as lost. */
@@ -191,84 +169,6 @@ function account(call, dir, { resent, lost }) {
   call.lost[dir] += lost;
   if (lost) log(`call ${call.id.slice(0, 8)}: ${secondsOf(lost)} of audio ${dir === 'in' ? 'from' : 'to'} the caller was too old to deliver`);
 }
-
-// ---- Dashboard: live audio status and a log of finished calls -----------------------------
-const CALL_LOG = path.join(__dirname, 'logs', 'calls.log');
-const CALL_LOG_MAX = 5 * 1024 * 1024; // then it's renamed to calls.1.log (replacing that) and begun anew
-const CALL_LOG_KEEP = 200;            // most recent finished calls kept in memory for new dashboard viewers
-const FLOW_STALE_MS = 1500;           // no frame this long: shown as stalled, not flowing
-const DASHBOARD_TICK_MS = 500;
-const callLog = []; // most recent first
-const dashboardClients = new Set();
-
-/** One direction's live status for the dashboard: is the socket up, is audio actually arriving. */
-function directionStatus(connected, r) {
-  return {
-    connected,
-    flowing: connected && Date.now() - r.lastAt < FLOW_STALE_MS,
-    dBFS: Number.isFinite(r.lastLevel) ? Math.round(r.lastLevel) : null,
-    frames: r.count,
-  };
-}
-
-function callSnapshot() {
-  return [...calls.values()].map(c => ({
-    id: c.id, caller: c.caller, startedAt: c.startedAt,
-    laptop: directionStatus(!!c.ws, c.in),   // audio coming into the server from the Teams computer
-    local: directionStatus(!!c.operator, c.out), // audio the local app is sending into the server
-  }));
-}
-
-function dashboardBroadcast(msg) {
-  if (!dashboardClients.size) return;
-  const data = JSON.stringify(msg);
-  for (const ws of dashboardClients) if (ws.readyState === ws.OPEN) ws.send(data);
-}
-
-// Every call ending writes a log line; unlike the rarer extension-issue log, this runs on the
-// audio hot path, so it must never block the event loop (no *Sync fs calls here).
-function recordCallEnded(entry) {
-  callLog.unshift(entry);
-  if (callLog.length > CALL_LOG_KEEP) callLog.length = CALL_LOG_KEEP;
-  dashboardBroadcast({ type: 'ended', entry });
-  fs.mkdir(path.dirname(CALL_LOG), { recursive: true }, (err) => {
-    if (err) return log(`could not save the call log: ${err.message}`);
-    const append = () => fs.appendFile(CALL_LOG, `${JSON.stringify(entry)}\n`, (err2) => {
-      if (err2) log(`could not save the call log: ${err2.message}`);
-    });
-    fs.stat(CALL_LOG, (err3, st) => {
-      if (!err3 && st.size > CALL_LOG_MAX) fs.rename(CALL_LOG, CALL_LOG.replace(/\.log$/, '.1.log'), append);
-      else append();
-    });
-  });
-}
-
-function onDashboardSocket(ws) {
-  let authed = false;
-  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
-
-  ws.on('message', (data, isBinary) => {
-    if (isBinary || authed) return;
-    let msg;
-    try { msg = JSON.parse(data); } catch { return; }
-    if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
-    clearTimeout(helloTimer);
-    authed = true;
-    dashboardClients.add(ws);
-    sendJson(ws, { type: 'init', calls: callSnapshot(), log: callLog, stations: stations.size, apps: operators.size });
-    log(`dashboard viewer connected (${ws.remote}); ${dashboardClients.size} watching`);
-  });
-
-  ws.on('close', () => {
-    clearTimeout(helloTimer);
-    if (dashboardClients.delete(ws)) log(`dashboard viewer disconnected (${ws.remote}); ${dashboardClients.size} watching`);
-  });
-}
-
-setInterval(() => {
-  if (!dashboardClients.size) return;
-  dashboardBroadcast({ type: 'tick', calls: callSnapshot(), stations: stations.size, apps: operators.size });
-}, DASHBOARD_TICK_MS);
 
 function endCall(call, reason) {
   clearTimeout(call.endTimer);
@@ -289,11 +189,6 @@ function endCall(call, reason) {
     : 'nothing lost';
   log(`call ${call.id.slice(0, 8)} ended after ${secs} s: caller -> app ${call.in.count} frames (${secondsOf(call.in.count)}), `
     + `app -> caller ${call.out.count} frames (${secondsOf(call.out.count)}), ${call.resent} re-sent after reconnects, ${lost}: ${reason}`);
-  recordCallEnded({
-    id: call.id, caller: call.caller, startedAt: call.startedAt, endedAt: Date.now(), durationSec: secs,
-    laptopFrames: call.in.count, localFrames: call.out.count, resent: call.resent,
-    lostFromLaptop: call.lost.in, lostFromLocal: call.lost.out, reason,
-  });
   broadcastCalls();
 }
 
@@ -556,47 +451,6 @@ function onOperatorSocket(ws) {
   });
 }
 
-// ---- Extension issues ----------------------------------------------------------------------
-// Problems the extension notices on the Teams computer, in a call or not (its own errors, a Teams
-// tab without its script, no Teams tab open), sent over /station. Each is written to
-// logs/extension-issues.log as one JSON object per line, and announced in one line of this log.
-const ISSUE_LOG = path.join(__dirname, 'logs', 'extension-issues.log');
-const ISSUE_LOG_MAX = 5 * 1024 * 1024; // then it's renamed to extension-issues.1.log (replacing that) and begun anew
-const ISSUES_PER_MINUTE = 30;          // per Teams computer; more than this in a minute are dropped
-const issueText = (value, max) => String(value ?? '').replace(/[\x00-\x09\x0b-\x1f\x7f]/g, ' ').slice(0, max);
-const issueTime = (value) => (Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : undefined);
-
-function recordIssue(ws, msg) {
-  const now = Date.now();
-  if (!ws.issues || now - ws.issues.since > 60000) ws.issues = { since: now, count: 0 };
-  if (++ws.issues.count > ISSUES_PER_MINUTE) return;
-  const count = Math.max(1, Math.min(1e9, Math.floor(Number(msg.count)) || 1));
-  const total = Math.max(count, Math.min(1e9, Math.floor(Number(msg.total)) || count));
-  const entry = {
-    time: new Date(now).toISOString(),
-    from: ws.remote,
-    client: ws.client,
-    where: issueText(msg.where, 80) || 'extension',
-    message: issueText(msg.message, 500) || 'unknown problem',
-    stack: issueText(msg.stack, 2000) || undefined,
-    count,
-    total,
-    firstSeen: issueTime(msg.firstSeen),
-    lastSeen: issueTime(msg.lastSeen),
-  };
-  try {
-    fs.mkdirSync(path.dirname(ISSUE_LOG), { recursive: true });
-    if ((fs.statSync(ISSUE_LOG, { throwIfNoEntry: false })?.size || 0) > ISSUE_LOG_MAX) {
-      fs.renameSync(ISSUE_LOG, ISSUE_LOG.replace(/\.log$/, '.1.log'));
-    }
-    fs.appendFileSync(ISSUE_LOG, `${JSON.stringify(entry)}\n`);
-  } catch (err) {
-    log(`could not save a Teams computer issue: ${err.message}`);
-  }
-  const times = total > count ? ` (${total} times so far)` : count > 1 ? ` (${count} times)` : '';
-  log(`Teams computer issue from ${ws.remote}, ${entry.where}: ${entry.message.slice(0, 200)}${times}`);
-}
-
 // ---- /station: the extension's always-on link ---------------------------------------------
 
 function onStationSocket(ws) {
@@ -633,9 +487,6 @@ function onStationSocket(ws) {
       case 'ring-ended':
         if (!rings.delete(msg.ringId)) return;
         break;
-      case 'issue':
-        recordIssue(ws, msg);
-        return;
       case 'answer-result': {
         const op = answeredBy.get(msg.ringId);
         if (!msg.ok) {
@@ -661,79 +512,6 @@ function onStationSocket(ws) {
   });
 }
 
-// ---- /tab-sound and /listen: the Teams tab's sound, all the time ----------------------------
-// The newest /tab-sound connection is the source (a reloaded extension replaces its old one); every
-// frame from it goes to each app listening on /listen. Nothing is held or stored: an app that can't
-// keep up (a slow network) skips frames rather than falling behind.
-const TAB_SOUND_FLOWING_MS = 3000; // sound within this long counts as flowing, for /healthz
-const LISTEN_MAX_BUFFERED = 64 * 1024; // ~2 s of audio waiting to leave for one app: skip frames
-const tabSound = { source: null, lastFrameAt: 0 };
-const listeners = new Set();
-
-function tabSoundState() {
-  if (!tabSound.source) return 'off';
-  return Date.now() - tabSound.lastFrameAt < TAB_SOUND_FLOWING_MS ? 'flowing' : 'connected';
-}
-
-function onTabSoundSocket(ws) {
-  let authed = false;
-  ws.frames = 0;
-  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
-
-  ws.on('message', (data, isBinary) => {
-    if (isBinary) {
-      if (!authed || tabSound.source !== ws) return;
-      if (!ws.frames++) log(`Teams tab sound flowing from ${ws.remote}`);
-      tabSound.lastFrameAt = Date.now();
-      for (const l of listeners) if (l.bufferedAmount < LISTEN_MAX_BUFFERED) l.send(data, { binary: true });
-      return;
-    }
-    let msg;
-    try { msg = JSON.parse(data); } catch { return; }
-    if (authed || msg.type !== 'hello') return;
-    clearTimeout(helloTimer);
-    if (!tokenMatches(msg.token, CALL_TOKEN)) return reject(ws);
-    if (msg.format && (msg.format.sampleRate !== FORMAT.sampleRate || msg.format.encoding !== FORMAT.encoding)) {
-      sendJson(ws, { type: 'error', message: `Unsupported audio format; this server expects ${JSON.stringify(FORMAT)}.` });
-      return ws.close(CLOSE.badHello, 'format');
-    }
-    authed = true;
-    if (tabSound.source && tabSound.source !== ws) tabSound.source.close(CLOSE.replaced, 'replaced');
-    tabSound.source = ws;
-    sendJson(ws, { type: 'ready' });
-    log(`Teams tab sound connected from ${ws.remote} (${String(msg.client || 'unknown client').slice(0, 80)}); ${listeners.size} app(s) listening`);
-  });
-
-  ws.on('close', () => {
-    clearTimeout(helloTimer);
-    if (tabSound.source !== ws) return;
-    tabSound.source = null;
-    log(`Teams tab sound from ${ws.remote} stopped: ${secondsOf(ws.frames)} received on this connection`);
-  });
-}
-
-function onListenSocket(ws) {
-  let authed = false;
-  const helloTimer = setTimeout(() => ws.close(CLOSE.badHello, 'hello timeout'), HELLO_TIMEOUT_MS);
-
-  ws.on('message', (data, isBinary) => {
-    if (isBinary || authed) return;
-    let msg;
-    try { msg = JSON.parse(data); } catch { return; }
-    clearTimeout(helloTimer);
-    if (msg.type !== 'hello' || !tokenMatches(msg.token, OPERATOR_TOKEN)) return reject(ws);
-    authed = true;
-    listeners.add(ws);
-    sendJson(ws, { type: 'ready', format: FORMAT, teamsSound: tabSoundState() });
-    log(`app listening to the Teams tab (${ws.remote}); ${listeners.size} listening`);
-  });
-
-  ws.on('close', () => {
-    clearTimeout(helloTimer);
-    if (listeners.delete(ws)) log(`app stopped listening to the Teams tab (${ws.remote}); ${listeners.size} listening`);
-  });
-}
-
 // ---- HTTP + WebSocket upgrade ------------------------------------------------------------
 
 /** Path of a request, or null for junk that URL() can't parse (scanners send things like "//"). */
@@ -745,10 +523,7 @@ const server = http.createServer((req, res) => {
   const pathname = pathOf(req.url);
   if (pathname === null) { res.writeHead(400).end('bad request'); return; }
   if (pathname === '/healthz') {
-    const health = {
-      ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size,
-      teamsComputers: stations.size, apps: operators.size, teamsSound: tabSoundState(), listening: listeners.size,
-    };
+    const health = { ok: true, uptimeSec: Math.round(process.uptime()), calls: calls.size, ringing: rings.size, teamsComputers: stations.size, apps: operators.size };
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(health));
     return;
   }
@@ -770,15 +545,9 @@ const server = http.createServer((req, res) => {
 // perMessageDeflate defaults to on in `ws`; compressing every 20 ms audio frame adds CPU work and
 // jitter for no benefit (PCM doesn't compress well), which was contributing to choppy audio.
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
-const ROUTES = {
-  '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket,
-  '/tab-sound': onTabSoundSocket, '/listen': onListenSocket, '/dashboard-ws': onDashboardSocket,
-};
+const ROUTES = { '/call': onCallSocket, '/operator': onOperatorSocket, '/station': onStationSocket };
 
-const WHO = {
-  '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer',
-  '/tab-sound': 'Teams tab sound', '/listen': 'Call Bridge app (listen)', '/dashboard-ws': 'dashboard viewer',
-};
+const WHO = { '/call': 'extension call', '/operator': 'Call Bridge app', '/station': 'Teams computer' };
 
 /** Closes a sign-in with a wrong token, and logs it so a misconfigured computer shows up in the log. */
 function reject(ws) {

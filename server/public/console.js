@@ -45,11 +45,6 @@ $('serverAddress').textContent = `Server: ${location.host}`;
 // /healthz needs no operator token, so this works even before signing in, unlike the WebSocket
 // status above and the per-station detail in #stations (which needs a live /operator connection).
 const HEALTH_POLL_MS = 5000;
-const SOUND_HEALTH = {
-  flowing: 'Teams sound: coming in.',
-  connected: 'Teams sound: connected, nothing playing in Teams right now.',
-  off: 'Teams sound: not sent (on the Teams computer, right-click the Teams page → "Send Teams sound to the server").',
-};
 
 async function pollHealth() {
   try {
@@ -62,14 +57,11 @@ async function pollHealth() {
       ? `Teams extension: connected${health.teamsComputers > 1 ? ` (${health.teamsComputers})` : ''}.`
       : 'Teams extension: not connected.';
     $('extensionHealth').dataset.ok = health.teamsComputers ? 'true' : 'false';
-    $('soundHealth').textContent = SOUND_HEALTH[health.teamsSound] || SOUND_HEALTH.off;
-    $('soundHealth').dataset.ok = health.teamsSound === 'off' || !health.teamsSound ? 'false' : 'true';
   } catch {
     $('serverHealth').textContent = 'Server: unreachable.';
     $('serverHealth').dataset.ok = 'false';
     $('extensionHealth').textContent = 'Teams extension: unknown (server unreachable).';
     $('extensionHealth').dataset.ok = 'false';
-    $('soundHealth').textContent = '';
   }
 }
 
@@ -342,7 +334,7 @@ function connect() {
   ws.onopen = () => ws.send(JSON.stringify(active ? { type: 'hello', token, resume: active.callId, have } : { type: 'hello', token }));
   ws.onmessage = (e) => {
     if (typeof e.data !== 'string') {
-      if (active && linked) { have++; callAudioAt = performance.now(); play(e.data); }
+      if (active && linked) { have++; play(e.data); }
       return;
     }
     const msg = JSON.parse(e.data);
@@ -353,7 +345,6 @@ function connect() {
         if (!active) setStatus('Connected. Waiting for calls.');
         $('login').hidden = true;
         $('main').hidden = false;
-        if ($('listen').checked) startListening();
         break;
       case 'calls': render(msg); break;
       case 'taken':
@@ -373,7 +364,6 @@ function connect() {
     updateRinging([]);
     if (e.code === 4001) {
       endCall();
-      stopListening();
       wantConnected = false;
       storage.set('');
       showLogin('Wrong operator token.');
@@ -381,7 +371,7 @@ function connect() {
     }
     // Another Call Bridge window picked this call up: it's that window's now.
     if (e.code === 4003) endCall('This call continued in another Call Bridge window.');
-    if (!wantConnected) { endCall(); stopListening(); showLogin('Signed out.'); return; }
+    if (!wantConnected) { endCall(); showLogin('Signed out.'); return; }
     if (active) {
       // Network blip or server restart mid-call: keep the call, its sound and the microphone going and
       // reconnect fast; the server holds the call and both sides catch up on what they missed.
@@ -515,7 +505,6 @@ function unlockSound() {
   ringCtx ||= new AudioContext();
   ringCtx.resume().catch(() => {});
   if (audio?.ctx.state === 'suspended') audio.ctx.resume().catch(() => {});
-  if (listen?.ctx.state === 'suspended') listen.ctx.resume().then(() => { if (listen?.ws?.readyState === WebSocket.OPEN) showListen('Listening.'); }).catch(() => {});
 }
 
 function ringBurst() {
@@ -696,10 +685,6 @@ function endCall(message) {
 function setCameraButton() {
   $('camera').setAttribute('aria-pressed', !!camera);
   $('camera').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
-  // A background chosen here only ever reaches the caller through this computer's own camera (see
-  // startCamera): disabled otherwise, so picking one while Teams still carries the call doesn't look
-  // like a silent no-op.
-  $('bgMode').disabled = !camera;
 }
 
 async function startCamera() {
@@ -755,87 +740,24 @@ function tick() {
   clock = setTimeout(tick, 1000);
 }
 
-/** Plays one 20 ms frame on `out` (the call's sound, or Listen's): { ctx, nextTime, played }. */
-function play(pcm, out = audio) {
-  if (!out) return;
-  const { ctx } = out;
+function play(pcm) {
+  if (!audio) return;
+  const { ctx } = audio;
   const samples = new Int16Array(pcm);
   const buf = ctx.createBuffer(1, samples.length, RATE);
   const ch = buf.getChannelData(0);
   for (let i = 0; i < samples.length; i++) ch[i] = samples[i] / 0x8000;
   const now = ctx.currentTime;
-  if (out.nextTime < now + 0.01) out.nextTime = now + START_BUFFER_S;
-  const ahead = out.nextTime - now;
+  if (audio.nextTime < now + 0.01) audio.nextTime = now + START_BUFFER_S;
+  const ahead = audio.nextTime - now;
   // Behind after a hiccup or a reconnect: catch up by leaving out pauses, never the caller's words.
   if ((ahead > CATCHUP_S && rms(ch) < QUIET_RMS) || ahead > MAX_BACKLOG_S) return;
   const src = new AudioBufferSourceNode(ctx, { buffer: buf });
   src.connect(ctx.destination);
-  src.start(out.nextTime);
-  out.nextTime += buf.duration;
-  out.played += buf.duration;
+  src.start(audio.nextTime);
+  audio.nextTime += buf.duration;
+  audio.played += buf.duration;
 }
-
-// ---- Listen to the Teams computer ---------------------------------------------------------------
-// Everything the Teams tab on the Teams computer plays, live, from the server's /listen (the extension
-// sends it all the time). While a call taken here brings the caller's audio, that plays instead, so
-// the caller isn't heard twice; when it brings none (e.g. the Teams computer can't hand it over), the
-// Teams tab's sound fills in.
-const LISTEN_KEY = 'callBridge.listen';
-const CALL_AUDIO_MS = 500; // the call's own audio arrived this recently: it's flowing
-let listen = null;         // { ws, ctx, nextTime, played, retry, timer } while Listen is on
-let callAudioAt = 0;
-
-function startListening() {
-  if (listen || !token) return;
-  listen = { ws: null, ctx: new AudioContext({ sampleRate: 48000 }), nextTime: 0, played: 0, retry: 0, timer: null };
-  listen.ctx.resume().catch(() => {});
-  connectListen(listen);
-}
-
-function connectListen(l) {
-  if (listen !== l) return;
-  const socket = l.ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/listen`);
-  socket.binaryType = 'arraybuffer';
-  showListen('Connecting…');
-  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', token }));
-  socket.onmessage = (e) => {
-    if (typeof e.data !== 'string') {
-      if (performance.now() - callAudioAt > CALL_AUDIO_MS) play(e.data, l);
-      return;
-    }
-    const msg = JSON.parse(e.data);
-    if (msg.type === 'ready') {
-      l.retry = 0;
-      showListen(l.ctx.state === 'running' ? 'Listening.' : 'Click anywhere in this window to hear it (Chrome keeps sound off until you do).');
-    }
-  };
-  socket.onclose = (e) => {
-    if (listen !== l) return;
-    if (e.code === 4001) { stopListening(); showListen('Wrong operator token.'); return; }
-    const delay = Math.min(15000, 1000 * 2 ** l.retry++);
-    showListen(`Connection lost. Reconnecting in ${Math.round(delay / 1000)} s…`);
-    l.timer = setTimeout(() => connectListen(l), delay);
-  };
-}
-
-function stopListening() {
-  if (!listen) return;
-  const l = listen;
-  listen = null;
-  clearTimeout(l.timer);
-  if (l.ws) { l.ws.onclose = null; l.ws.close(); }
-  l.ctx.close().catch(() => {});
-  showListen('');
-}
-
-function showListen(text) { $('listenStatus').textContent = text; }
-
-$('listen').checked = storage.get(LISTEN_KEY) === 'on';
-$('listen').addEventListener('change', () => {
-  storage.set($('listen').checked ? 'on' : '', LISTEN_KEY);
-  if ($('listen').checked) startListening();
-  else stopListening();
-});
 
 function rms(f) {
   let sum = 0;

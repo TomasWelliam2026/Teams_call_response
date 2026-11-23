@@ -1,16 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.7.0",
+  "version": "0.6.5",
   "description": "Links Teams web to your Call Bridge server, so calls ring, are answered and are talked on from the Call Bridge app.",
   "minimum_chrome_version": "116",
-  "permissions": ["storage", "tabs", "sidePanel", "alarms", "tabCapture", "offscreen", "activeTab", "contextMenus"],
-  "commands": {
-    "send-teams-sound": {
-      "suggested_key": { "default": "Alt+Shift+S" },
-      "description": "Send this Teams tab's sound to the Call Bridge server"
-    }
-  },
+  "permissions": ["storage", "tabs", "sidePanel", "alarms"],
   "host_permissions": [
     "https://teams.microsoft.com/*",
     "https://teams.cloud.microsoft/*",

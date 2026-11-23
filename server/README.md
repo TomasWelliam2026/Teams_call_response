@@ -145,11 +145,6 @@ Treat both tokens like passwords. To change them, delete `.env`, run setup again
 tokens in the extension and the app.
 
 The server has no window of its own. Its logs are in `logs/` (`server.log`, `caddy.log`, `turn.log`).
-`logs/extension-issues.log` holds the problems the extension reports from the Teams computer, in a call
-or not (its own errors, a Teams tab without its script, no Teams tab open): one JSON object per line
-with the time, the Teams computer's address and version, where it happened, the message, the stack,
-and how often. Each also gets one line in `server.log` ("Teams computer issue from …"). Past 5 MB the
-file becomes `extension-issues.1.log` and starts again.
 Don't start it with `npm start` on the VPS: the services already run it with the settings from `.env`.
 
 ### Move to another VPS
@@ -185,11 +180,6 @@ docker run -p 8080:8080 -e BRIDGE_TOKEN=... call-bridge
 Then put the URL `wss://<your-host>/call` in the extension's side panel. If your platform has an idle
 timeout, make sure it allows WebSockets. The server pings every 20 s to keep connections open.
 `GET /healthz` returns `{ ok: true, calls: n }` for health checks.
-
-`GET /dashboard` is a live monitoring page (same operator token as the console): real-time meters for
-every call in progress, one per direction — "Laptop → server" (audio arriving from the Teams computer)
-and "Local → server" (the operator app's own microphone) — plus a log of calls that have ended, kept in
-`logs/calls.log` and the last 200 in memory for new viewers.
 
 Camera control additionally needs `turn-server.js` reachable over UDP at the same hostname (see
 "Camera control" above); most container platforms don't forward arbitrary UDP ports to a container,
@@ -227,11 +217,6 @@ resets the headset, the app reopens it instead. The camera microphone is the inp
 camera, or one named like a camera. If Windows doesn't expose one (in Sound settings → Recording, show disabled devices and enable the camera's microphone),
 the app says so and keeps the headset. Microphones are always opened by exact device, never "any
 microphone".
-
-**Listen to the Teams computer** plays, live, everything the Teams tab on the Teams computer plays
-(callers, ringtones), whether or not a call is taken here; the line "Teams sound" at the top says whether
-it is coming in. While a call taken here brings the caller's own audio, that plays instead, so nobody is
-heard twice. The choice is remembered on this computer.
 
 **Take full control (camera)**, shown once on a call, sends this computer's camera into the call (see
 "Camera control" above). It asks for the camera the first time it's clicked, not at sign-in, since it's
@@ -280,13 +265,6 @@ the client sends `{"type":"hello","role":"station","token"}`, then `{"type":"rin
 `{"type":"ring-ended","ringId"}`, `{"type":"answer-result","ringId","ok","message"}` and `{"type":"ping"}`
 every 20 s. The server sends `{"type":"answer"|"decline","ringId","mode"}`.
 A `/call` hello that carries the answered `ringId` is routed to the operator who pressed Answer.
-
-**`/tab-sound`**, the extension's capture of the whole Teams tab, all the time: the client sends
-`{"type":"hello","token","client","format"}` (`BRIDGE_TOKEN`), gets `{"type":"ready"}`, then sends binary
-frames in the `/call` format. The newest connection is the source. **`/listen`**, for the app: the client
-sends `{"type":"hello","token"}` (operator token), gets `{"type":"ready","teamsSound"}`, then receives
-those frames live; nothing is held or stored, and a listener that falls behind skips frames.
-`/healthz` reports `teamsSound` (`flowing`, `connected` or `off`) and `listening`.
 
 **`/operator`**, used by the app: the client sends `{"type":"hello","token":"…"}` (plus `resume` and `have` to get its call back after a reconnect, see above). The server
 sends `{"type":"ready","iceServers":[…]}` then `{"type":"calls","calls":[…],"rings":[…],"stations":n,"mine":id}` whenever anything changes.

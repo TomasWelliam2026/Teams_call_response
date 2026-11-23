@@ -19,7 +19,6 @@
     <p id="serverAddress" class="muted"></p>
     <p id="serverHealth" class="stations" role="status"></p>
     <p id="extensionHealth" class="stations" role="status"></p>
-    <p id="soundHealth" class="stations" role="status"></p>
 
     <form id="login">
       <label for="token">Operator token</label>
@@ -35,10 +34,6 @@
 
     <div id="main" hidden>
       <p id="stations" class="stations"></p>
-      <label class="check" title="Hear everything the Teams tab on the Teams computer plays (callers, ringtones), live, even when no call is taken here">
-        <input type="checkbox" id="listen"> Listen to the Teams computer
-      </label>
-      <p id="listenStatus" class="muted"></p>
       <label class="check" id="krispRow" hidden title="Use the Krisp desktop app's microphone: Krisp removes the noise, and you choose the headset or camera microphone in the Krisp app">
         <input type="checkbox" id="useKrisp" checked> Use Krisp microphone (Krisp removes the noise)
       </label>
@@ -66,7 +61,7 @@
           </div>
           <div class="row">
             <label>Background
-              <select id="bgMode" disabled title="Take full control (camera) first: this only reaches the caller through this computer's own camera.">
+              <select id="bgMode">
                 <option value="none">None</option>
                 <option value="blur">Blur</option>
                 <option value="inTheZone1">In The Zone</option>
