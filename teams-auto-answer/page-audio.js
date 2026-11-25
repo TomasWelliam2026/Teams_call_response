@@ -624,6 +624,7 @@
       const before = await inboundAudio();
       await new Promise((r) => setTimeout(r, 1000));
       const after = await inboundAudio();
+      const revived = [];
       const connections = [...pcs].map((pc) => {
         const role = peers.has(pc) ? 'bridged' : ignore.has(pc) ? 'other call' : 'not bridged';
         const dirs = audioDirections(pc).map(d => d || 'not negotiated').join(', ') || 'none';
@@ -634,6 +635,14 @@
         const rtp = a && b
           ? `${b.packets - a.packets} packets/s, ${b.samples - a.samples} samples/s, receiving ssrc ${b.ssrcs.join('/') || 'none'}`
           : 'no stats';
+        // Packets keep arriving but nothing gets decoded: Chrome's own audio pipeline for this track
+        // has stalled (seen with a Teams call embedded in another site, e.g. outlook.office.com),
+        // not a caller on mute (which still decodes silence) or a connection problem (dirs/rtp above
+        // would show that instead). Recreating this track's reader and player often unsticks it.
+        if (role === 'bridged' && a && b && b.packets > a.packets && b.samples === a.samples) {
+          const track = pc.getReceivers().map(r => r.track).find(t => t?.kind === 'audio' && t.readyState === 'live');
+          if (track && receiver.revive(track)) revived.push(`#${pcNumber.get(pc)}`);
+        }
         return `#${pcNumber.get(pc)} ${role} ${pc.connectionState}/${pc.iceConnectionState} in ${madeIn.get(pc)}, `
           + `audio ${dirs}, far end's audio ${farEndAudio(pc)}, audio tracks [${tracks}], ${rtp}`;
       });
@@ -645,7 +654,8 @@
         type: 'note',
         message: `No audio from the caller for ${STALL_REPORT_MS / 1000} s, call still on. Page ${document.visibilityState}`
           + `${document.hasFocus() ? ' focused' : ''}. Connections: ${connections.join('; ') || 'none'}. `
-          + `Teams players: ${teamsPlayers.join(', ') || 'none'}. Frames: ${describeFrames()}. Reading: ${receiver.describe()}.`,
+          + `Teams players: ${teamsPlayers.join(', ') || 'none'}. Frames: ${describeFrames()}. Reading: ${receiver.describe()}.`
+          + `${revived.length ? ` Chrome had stopped decoding ${revived.join(', ')} (packets kept arriving): recreated its player.` : ''}`,
       });
     }
 
@@ -883,8 +893,29 @@
       }
     }
 
+    /** Recreates `track`'s reader and keep-alive player in place (same group/order), to recover from
+     * Chrome's decoder stalling on it while packets keep arriving (see checkStall). */
+    function revive(track) {
+      const s = sources.get(track);
+      if (!s) return false;
+      s.reader.cancel().catch(() => {});
+      ownPlayers.delete(s.el);
+      s.el.srcObject = null;
+      const el = new Audio();
+      ownPlayers.add(el);
+      el.muted = true;
+      el.srcObject = new MediaStream([track]);
+      el.play().catch(() => {});
+      s.el = el;
+      s.reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+      s.lastData = performance.now(); // a moment's grace before this could count as stalled again
+      read(s);
+      return true;
+    }
+
     return {
       add,
+      revive,
       /** For a stall report: each track being read, how long since it delivered audio, its player. */
       describe() {
         const now = performance.now();
