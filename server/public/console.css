@@ -20,18 +20,30 @@ svg[hidden] { display: none; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
 main { max-width: 420px; margin: 0 auto; padding: 14px 14px 20px; }
 
-.top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.top {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line);
+}
 /* The wordmark carries a small power lamp of its own — the one thing on the page that isn't a status
    readout, so it earns a little personality instead of plain text. */
 h1 { display: flex; align-items: center; gap: 8px; font: 700 18px/1.2 var(--sans); margin: 0; letter-spacing: -.01em; }
 h1::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 20%, transparent); }
 .muted { color: var(--muted); }
 
+/* Every function lives in its own bordered panel, each a clear step down from the one before. */
+.panel {
+  background: var(--card); border: 1px solid var(--line); border-radius: 6px;
+  padding: 12px 14px 14px; margin-bottom: 14px;
+}
+.panel:last-child { margin-bottom: 0; }
+form.panel { padding-top: 14px; }
+
 /* A section label reads as a panel divider, not a decorative eyebrow: a rule the text sits on. */
 h2 {
-  font: 12px/1.2 var(--mono); color: var(--muted); margin: 14px 0 6px; padding-bottom: 5px;
-  border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 7px; font: 12px/1.2 var(--mono); color: var(--muted);
+  margin: -2px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
 }
+h2 .ic { opacity: .8; }
 
 /* ---- Lamps: every status line is a dot (currentColor) plus plain-language text ---- */
 .stations, .mic {
@@ -92,16 +104,16 @@ label.check input[type=checkbox]:checked::before { transform: translateX(14px); 
 label.check input[type=checkbox]:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 
 /* ---- Panels ---- */
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 10px; }
-.card.ring { border-color: var(--amber); }
-.card.ring .row { margin-top: 0; }
-/* The one bold accent in the whole page: a tally light down the side of the call actually live. */
-.card.live { border-color: var(--line); border-left: 3px solid var(--live); padding-left: 11px; }
+/* The one bold accent in the whole page: a tally light down the side of the panel actually live. */
+.panel.live { border-left: 3px solid var(--live); padding-left: 12px; }
 #activeCaller { font: 15px/1.3 var(--mono); }
 #activeClock, #micSource, #cameraStatus { font: 13px var(--mono); color: var(--muted); }
 
 .calls { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .calls li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.calls li.card { background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 8px 10px; }
+.calls li.card.ring { border-color: var(--amber); }
+.calls li.card.ring .row { margin-top: 0; }
 
 .preview[hidden] { display: none; }
 .preview { margin-top: 10px; width: 100%; max-width: 240px; border-radius: 4px; background: #000; display: block; border: 1px solid var(--line); }

@@ -20,16 +20,24 @@
     <symbol id="ic-release" viewBox="0 0 20 20"><path d="M10 3v8"/><path d="M6 7l4-4 4 4"/><path d="M4 13v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2"/></symbol>
     <symbol id="ic-handback" viewBox="0 0 20 20"><path d="M8 4 3 9l5 5"/><path d="M3 9h9a5 5 0 0 1 5 5v2"/></symbol>
     <symbol id="ic-hangup" viewBox="0 0 20 20"><path d="M3 5c0 7 5 12 12 12l2-3-4-3-2 2a9 9 0 0 1-5-5l2-2-3-4z"/><path d="M3 3l14 14"/></symbol>
+    <symbol id="ic-plug" viewBox="0 0 20 20"><path d="M7 2v4M13 2v4"/><path d="M5 6h10v4a5 5 0 0 1-5 5 5 5 0 0 1-5-5V6Z"/><path d="M10 15v3"/></symbol>
+    <symbol id="ic-phone" viewBox="0 0 20 20"><path d="M4 4c0 7 5 12 12 12l2-3-4-2-2 2a9 9 0 0 1-5-5l2-2-2-4z"/></symbol>
+    <symbol id="ic-phone-ring" viewBox="0 0 20 20"><path d="M4 4c0 7 5 12 12 12l2-3-4-2-2 2a9 9 0 0 1-5-5l2-2-2-4z"/><path d="M13 2.5a4.5 4.5 0 0 1 2.8 2.8"/><path d="M15 1a7.3 7.3 0 0 1 4 4"/></symbol>
+    <symbol id="ic-list" viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h8"/></symbol>
   </svg>
   <main>
     <header class="top">
       <h1>Safe Job</h1>
     </header>
-    <p id="serverAddress" class="muted"></p>
-    <p id="serverHealth" class="stations" role="status"></p>
-    <p id="extensionHealth" class="stations" role="status"></p>
+    <section class="panel">
+      <h2><svg class="ic"><use href="#ic-plug"/></svg>Connection</h2>
+      <p id="serverAddress" class="muted"></p>
+      <p id="serverHealth" class="stations" role="status"></p>
+      <p id="extensionHealth" class="stations" role="status"></p>
+      <p id="status" class="status" role="status">Not connected.</p>
+    </section>
 
-    <form id="login">
+    <form id="login" class="panel">
       <label for="token">Operator token</label>
       <div class="row">
         <input type="password" id="token" autocomplete="current-password" required>
@@ -38,56 +46,55 @@
       <label class="check"><input type="checkbox" id="remember" checked> Remember on this computer and connect automatically</label>
     </form>
 
-    <p id="status" class="status" role="status">Not connected.</p>
-    <p id="mic" class="mic" role="status"></p>
-
     <div id="main" hidden>
-      <p id="stations" class="stations"></p>
-      <label class="check" id="krispRow" hidden title="Use the Krisp desktop app's microphone: Krisp removes the noise, and you choose the headset or camera microphone in the Krisp app">
-        <input type="checkbox" id="useKrisp" checked> Use Krisp microphone (Krisp removes the noise)
-      </label>
-      <label class="check" id="krispSpeakerRow" hidden title="Play the caller through the Krisp desktop app instead of the speakers directly, so Krisp also removes noise from what you hear. Needs Safe Job selected for Krisp in the Krisp app itself; off by default since otherwise the caller would play into nothing.">
-        <input type="checkbox" id="useKrispSpeaker"> Also play the caller through Krisp
-      </label>
+      <section class="panel">
+        <h2><svg class="ic"><use href="#ic-mic"/></svg>Microphone</h2>
+        <p id="mic" class="mic" role="status"></p>
+        <p id="stations" class="stations"></p>
+        <label class="check" id="krispRow" hidden title="Use the Krisp desktop app's microphone: Krisp removes the noise, and you choose the headset or camera microphone in the Krisp app">
+          <input type="checkbox" id="useKrisp" checked> Use Krisp microphone (Krisp removes the noise)
+        </label>
+        <label class="check" id="krispSpeakerRow" hidden title="Play the caller through the Krisp desktop app instead of the speakers directly, so Krisp also removes noise from what you hear. Needs Safe Job selected for Krisp in the Krisp app itself; off by default since otherwise the caller would play into nothing.">
+          <input type="checkbox" id="useKrispSpeaker"> Also play the caller through Krisp
+        </label>
+      </section>
 
-      <section id="ringsSection" hidden>
-        <h2>Ringing</h2>
+      <section id="ringsSection" class="panel" hidden>
+        <h2><svg class="ic"><use href="#ic-phone-ring"/></svg>Ringing</h2>
         <ul id="rings" class="calls"></ul>
       </section>
 
-      <section id="active" hidden>
-        <h2>On call</h2>
-        <div class="card live">
-          <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
-          <div class="row">
-            <button id="mute"><svg class="ic"><use href="#ic-mic"/></svg><span class="label">Mute</span></button>
-            <button id="notHeadset" aria-pressed="false" title="Talk through the camera's microphone instead of the headset (e.g. when you take the headset off)"><svg class="ic"><use href="#ic-headset"/></svg><span class="label">Not Headset</span></button>
-            <button id="release" title="Stop hearing this call; the caller stays connected"><svg class="ic"><use href="#ic-release"/></svg>Release</button>
-            <button id="handBack" title="Stop the bridge; the person at the Teams computer gets the call back"><svg class="ic"><use href="#ic-handback"/></svg>Hand back to Teams computer</button>
-            <button id="endCall" class="danger" title="Hang up the call on the Teams computer too, not just release the bridge"><svg class="ic"><use href="#ic-hangup"/></svg>End call</button>
-          </div>
-          <p id="micSource" class="muted"></p>
-          <div class="row">
-            <button id="camera" title="Send this computer's camera into the call instead of the Teams computer's"><svg class="ic"><use href="#ic-camera"/></svg><span class="label">Take full control (camera)</span></button>
-            <span id="cameraStatus" class="muted"></span>
-          </div>
-          <div class="row">
-            <label>Background
-              <select id="bgMode" disabled title="Take full control (camera) first: this only reaches the caller through this computer's own camera.">
-                <option value="none">None</option>
-                <option value="blur">Blur</option>
-                <option value="inTheZone1">In The Zone</option>
-                <option value="inTheZone2">In The Zone 2</option>
-                <option value="starfieldGravJump">Starfield – Grav Jump</option>
-              </select>
-            </label>
-          </div>
-          <video id="cameraPreview" class="preview" autoplay muted playsinline hidden></video>
+      <section id="active" class="panel live" hidden>
+        <h2><svg class="ic"><use href="#ic-phone"/></svg>On call</h2>
+        <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
+        <div class="row">
+          <button id="mute"><svg class="ic"><use href="#ic-mic"/></svg><span class="label">Mute</span></button>
+          <button id="notHeadset" aria-pressed="false" title="Talk through the camera's microphone instead of the headset (e.g. when you take the headset off)"><svg class="ic"><use href="#ic-headset"/></svg><span class="label">Not Headset</span></button>
+          <button id="release" title="Stop hearing this call; the caller stays connected"><svg class="ic"><use href="#ic-release"/></svg>Release</button>
+          <button id="handBack" title="Stop the bridge; the person at the Teams computer gets the call back"><svg class="ic"><use href="#ic-handback"/></svg>Hand back to Teams computer</button>
+          <button id="endCall" class="danger" title="Hang up the call on the Teams computer too, not just release the bridge"><svg class="ic"><use href="#ic-hangup"/></svg>End call</button>
         </div>
+        <p id="micSource" class="muted"></p>
+        <div class="row">
+          <button id="camera" title="Send this computer's camera into the call instead of the Teams computer's"><svg class="ic"><use href="#ic-camera"/></svg><span class="label">Take full control (camera)</span></button>
+          <span id="cameraStatus" class="muted"></span>
+        </div>
+        <div class="row">
+          <label>Background
+            <select id="bgMode" disabled title="Take full control (camera) first: this only reaches the caller through this computer's own camera.">
+              <option value="none">None</option>
+              <option value="blur">Blur</option>
+              <option value="inTheZone1">In The Zone</option>
+              <option value="inTheZone2">In The Zone 2</option>
+              <option value="starfieldGravJump">Starfield – Grav Jump</option>
+            </select>
+          </label>
+        </div>
+        <video id="cameraPreview" class="preview" autoplay muted playsinline hidden></video>
       </section>
 
-      <section id="callsSection" hidden>
-        <h2>Live calls</h2>
+      <section id="callsSection" class="panel" hidden>
+        <h2><svg class="ic"><use href="#ic-list"/></svg>Live calls</h2>
         <ul id="calls" class="calls"></ul>
       </section>
 
