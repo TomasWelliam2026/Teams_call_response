@@ -35,6 +35,7 @@ const FORMAT = { encoding: 'pcm_s16le', sampleRate: 16000, channels: 1 };
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ANSWER_ROUTE_MS = 60000;   // after Answer in the local app, the call that connects within this goes to that operator
 const ENDED_MEMORY_MS = 10 * 60000; // how long an ended call's id is remembered, to tell a reconnecting app it's over
+const HANG_UP_WAIT_MS = 15000;   // after the app's End call, how long Teams has to hang up before the call shows as still on
 const STATIC = {
   '/': 'index.html', '/console.js': 'console.js', '/capture-worklet.js': 'capture-worklet.js', '/console.css': 'console.css',
   '/manifest.webmanifest': 'manifest.webmanifest', '/sw.js': 'sw.js', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png',
@@ -89,7 +90,7 @@ const iceServersFor = (ws) => [
 
 /**
  * callId -> { id, caller, ws, operator, startedAt, endTimer, operatorTimer, awaitingOperator,
- *             in: Ring, out: Ring, resent, lost: { in, out } }
+ *             hangingUp, hangUpTimer, in: Ring, out: Ring, resent, lost: { in, out } }
  * in: caller -> operator audio, out: operator -> caller audio. Every frame is numbered; the last
  * HOLD_FRAMES of each direction are kept so a side that reconnects (after a network blip, or a
  * connection that died without anyone noticing yet) gets exactly the frames it is missing.
@@ -107,7 +108,7 @@ const rings = new Map();
 const answeredBy = new Map();
 
 function callList() {
-  return [...calls.values()].map(c => ({
+  return [...calls.values()].filter(c => !c.hangingUp).map(c => ({
     id: c.id, caller: c.caller, startedAt: c.startedAt, connected: !!c.ws, taken: !!c.operator,
   }));
 }
@@ -170,10 +171,33 @@ function account(call, dir, { resent, lost }) {
   if (lost) log(`call ${call.id.slice(0, 8)}: ${secondsOf(lost)} of audio ${dir === 'in' ? 'from' : 'to'} the caller was too old to deliver`);
 }
 
+/** The app's End call: the app is done with the call at once, but it only ends here once the
+ * extension says Teams hung up. If that doesn't come, the call is still on at the Teams computer:
+ * it's logged and shown to the apps again, instead of carrying on unseen. */
+function hangUp(call) {
+  if (call.operator) {
+    sendJson(call.operator, { type: 'released', callId: call.id, reason: 'operator ended the call' });
+    call.operator.callId = null;
+    call.operator = null;
+  }
+  call.awaitingOperator = false;
+  call.hangingUp = true;
+  sendJson(call.ws, { type: 'end-call' }); // without a connection now, it's sent when the extension reconnects
+  clearTimeout(call.hangUpTimer);
+  call.hangUpTimer = setTimeout(() => {
+    if (calls.get(call.id) !== call) return;
+    call.hangingUp = false;
+    log(`call ${call.id.slice(0, 8)}: the app pressed End call, but Teams didn't hang up within ${HANG_UP_WAIT_MS / 1000} s: `
+      + 'the call is still on at the Teams computer');
+    broadcastCalls();
+  }, HANG_UP_WAIT_MS);
+}
+
 function endCall(call, reason) {
   clearTimeout(call.endTimer);
   clearTimeout(call.operatorTimer);
   clearTimeout(call.rewindTimer);
+  clearTimeout(call.hangUpTimer);
   if (calls.get(call.id) !== call) return; // already ended (e.g. operator handed back, then the extension said goodbye)
   calls.delete(call.id);
   endedCalls.set(call.id, reason);
@@ -259,6 +283,7 @@ function onCallSocket(ws) {
       // got: the extension sends again every caller frame after this one.
       sendJson(ws, { type: 'ready', callId: id, format: FORMAT, handler: call.operator ? 'operator' : FALLBACK, iceServers: iceServersFor(ws), got: call.in.count });
       if (resumed) account(call, 'out', replay(call.out, have, ws)); // after 'ready': the extension ignores audio before it
+      if (call.hangingUp) sendJson(ws, { type: 'end-call' }); // asked while it was away
       broadcastCalls();
     } else if (msg.type === 'mute-state' && call) {
       // The Teams computer's mute state (Teams' own Mute button, or the app's request applied there).
@@ -275,7 +300,7 @@ function onCallSocket(ws) {
       // Something worth knowing after the call, e.g. Teams switching media connections.
       log(`call ${call.id.slice(0, 8)}: ${String(msg.message || '').slice(0, 1500)}`);
     } else if (msg.type === 'end' && call) {
-      endCall(call, msg.reason || 'extension ended the call');
+      endCall(call, call.hangingUp ? 'operator ended the call' : msg.reason || 'extension ended the call');
       call = null;
       ws.close(1000);
     }
@@ -390,6 +415,7 @@ function onOperatorSocket(ws) {
     switch (msg.type) {
       case 'take':
         if (!call) return sendJson(ws, { type: 'error', message: 'That call has ended.' });
+        if (call.hangingUp) return sendJson(ws, { type: 'error', message: 'That call is being hung up.' });
         if (call.operator && call.operator !== ws) return sendJson(ws, { type: 'error', message: 'Another operator has that call.' });
         giveCallTo(call, ws);
         log(`call ${call.id.slice(0, 8)} taken by the app`);
@@ -431,7 +457,7 @@ function onOperatorSocket(ws) {
         if (call) { sendJson(call.ws, { type: 'stop', reason: 'An operator handed the call back.' }); endCall(call, 'operator handed it back'); }
         break;
       case 'end-call': // actually hang up, not just hand the bridge back
-        if (call) { sendJson(call.ws, { type: 'end-call' }); endCall(call, 'operator ended the call'); }
+        if (call) hangUp(call);
         break;
       case 'video-offer':
       case 'video-ice':
