@@ -208,13 +208,13 @@ function toggleSettings() {
 
 function createTray() {
   tray = new Tray(path.join(__dirname, 'icon.png'));
-  tray.setToolTip('Call Bridge');
+  tray.setToolTip('Safe Job');
   tray.on('click', toggle);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Settings…', click: toggleSettings },
       { type: 'separator' },
-      { label: 'Quit Call Bridge', click: () => app.quit() },
+      { label: 'Quit Safe Job', click: () => app.quit() },
     ])
   );
 }

@@ -409,7 +409,7 @@ function connect() {
       return;
     }
     // Another Call Bridge window picked this call up: it's that window's now.
-    if (e.code === 4003) endCall('This call continued in another Call Bridge window.');
+    if (e.code === 4003) endCall('This call continued in another Safe Job window.');
     if (!wantConnected) { endCall(); showLogin('Signed out.'); return; }
     if (active) {
       // Network blip or server restart mid-call: keep the call, its sound and the microphone going and
@@ -577,12 +577,12 @@ function updateRinging(next) {
     clearInterval(ringTimer);
     ringTimer = null;
   }
-  document.title = shouldRing ? `📞 ${rings[0].caller} is calling` : 'Call Bridge';
+  document.title = shouldRing ? `📞 ${rings[0].caller} is calling` : 'Safe Job';
 
   if (shouldRing && 'Notification' in window && Notification.permission === 'granted') {
     for (const r of rings) {
       if (notes.has(r.ringId) || r.answering) continue;
-      const n = new Notification('Incoming Teams call', { body: `${r.caller} — open Call Bridge to answer`, tag: r.ringId, requireInteraction: true });
+      const n = new Notification('Incoming Teams call', { body: `${r.caller} — open Safe Job to answer`, tag: r.ringId, requireInteraction: true });
       n.onclick = () => { window.focus(); n.close(); };
       notes.set(r.ringId, n);
     }
@@ -850,11 +850,6 @@ $('login').addEventListener('submit', (e) => {
   signIn($('token').value.trim(), $('remember').checked);
   checkMic();
 });
-$('signOut').addEventListener('click', () => {
-  wantConnected = false;
-  storage.set('');
-  ws?.close();
-});
 // Mute is shared with the Teams computer: the app stops sending at once, and the extension presses
 // Teams' own Mute there. Muting in Teams comes back as 'mute-state' and updates this button.
 $('mute').addEventListener('click', () => {
@@ -934,18 +929,7 @@ $('endCall').addEventListener('click', () => {
 // Any click makes later ringing audible (Chrome blocks sound until the user has interacted).
 document.addEventListener('pointerdown', unlockSound);
 
-// Install as a desktop app (Chrome shows this when the app isn't installed yet).
-let installPrompt = null;
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  installPrompt = e;
-  $('install').hidden = false;
-});
-$('install').addEventListener('click', async () => {
-  $('install').hidden = true;
-  await installPrompt?.prompt();
-  installPrompt = null;
-});
+// Chrome's own install-as-desktop-app UI still works without a button of our own to trigger it.
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 
 // Remembered on this computer: connect straight away (also after Windows starts the app).

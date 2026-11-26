@@ -171,7 +171,7 @@ if (location.protocol !== 'file:') {
       loginSwitch.style.background = on ? green : line;
       switchKnob.style.transform = on ? 'translateX(15px)' : 'translateX(0)';
     }
-    const loginLabel = el('label', `font-size:12.5px; color:${fg};`, { textContent: 'Start Call Bridge when Windows starts' });
+    const loginLabel = el('label', `font-size:12.5px; color:${fg};`, { textContent: 'Start Safe Job when Windows starts' });
     const loginRow = el('div', 'display:flex; align-items:center; justify-content:space-between; gap:12px; margin:0 0 4px;');
     loginRow.append(loginLabel, loginSwitch);
 

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.8.4",
-  "description": "Links Teams web to your Call Bridge server, so calls ring, are answered and are talked on from the Call Bridge app.",
+  "version": "0.8.5",
+  "description": "Links Teams web to your Safe Job server, so calls ring, are answered and are talked on from the Safe Job app.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "tabs", "sidePanel", "alarms"],
   "host_permissions": [

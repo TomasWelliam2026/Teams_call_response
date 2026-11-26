@@ -53,7 +53,7 @@ async function main() {
     const health = await (await fetch(`http://127.0.0.1:${PORT}/healthz`)).json();
     assert.equal(health.ok, true);
     const page = await fetch(`http://127.0.0.1:${PORT}/`);
-    assert.match(await page.text(), /<title>Call Bridge<\/title>/);
+    assert.match(await page.text(), /<title>Safe Job<\/title>/);
     console.log('ok  health check and console page');
 
     const bad = await open('/call');

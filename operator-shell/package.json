@@ -13,7 +13,7 @@
   },
   "build": {
     "appId": "com.callbridge.shell",
-    "productName": "Call Bridge",
+    "productName": "Safe Job",
     "files": ["main.js", "preload.js", "setup.html", "icon.png", "package.json"],
     "win": {
       "target": "portable",

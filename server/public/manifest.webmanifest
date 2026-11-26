@@ -1,12 +1,12 @@
 {
-  "name": "Call Bridge",
-  "short_name": "Call Bridge",
+  "name": "Safe Job",
+  "short_name": "Safe Job",
   "description": "Answer Teams calls from this computer: hear the caller and talk through your microphone.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "background_color": "#202124",
-  "theme_color": "#188038",
+  "theme_color": "#1f8a4c",
   "icons": [
     { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
     { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }

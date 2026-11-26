@@ -34,7 +34,7 @@ function render() {
   let detail;
   if (problem) { state = 'invalid'; detail = problem; }
   else if (!url || !token) { state = 'off'; detail = 'Enter the server URL and access token. It connects automatically.'; }
-  else if (state === 'connected') detail = `Connected to ${host}. Incoming Teams calls now ring in the Call Bridge app.`;
+  else if (state === 'connected') detail = `Connected to ${host}. Incoming Teams calls now ring in the Safe Job app.`;
   else if (state === 'disconnected') detail = `${stationStatus.reason || 'Connection lost.'} Retrying automatically.`;
   else { state = 'connecting'; detail = `Connecting to ${host}…`; }
   $('stationStatus').dataset.state = state;
