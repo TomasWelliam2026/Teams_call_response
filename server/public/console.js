@@ -158,6 +158,39 @@ async function krispInUse() {
 
 const krispActive = () => useKrisp && krispPresent;
 
+// ---- Krisp speaker (playing the caller through Krisp too) ----------------------------------
+// Off by default: unlike the microphone (which falls back to the headset if Krisp can't open),
+// playing into "Krisp Speaker" when Krisp hasn't been told to forward Call Bridge's audio (set per
+// app, in the Krisp app itself) would just play into nothing. The user turns this on once they've
+// done that.
+const KRISP_SPEAKER_KEY = 'callBridge.krispSpeaker';
+let useKrispSpeaker = storage.get(KRISP_SPEAKER_KEY) === 'on';
+let krispSpeakerPresent = false;
+
+async function krispSpeaker() {
+  return (await media.enumerateDevices()).find(d => d.kind === 'audiooutput' && KRISP_LABEL.test(d.label)
+    && d.deviceId && !['default', 'communications'].includes(d.deviceId)) || null;
+}
+
+function setKrispSpeakerRow() {
+  $('krispSpeakerRow').hidden = !krispSpeakerPresent;
+  $('useKrispSpeaker').checked = useKrispSpeaker;
+}
+
+/** Applies the chosen output device to `ctx` (the call's AudioContext): Krisp Speaker if turned on
+ * and present, else back to the system default. Safe to call any time during a call. */
+async function applyOutputSink(ctx) {
+  if (!ctx.setSinkId) return; // older Chromium: stays on the default device
+  const found = await krispSpeaker();
+  krispSpeakerPresent = !!found;
+  const speaker = useKrispSpeaker ? found : null;
+  try {
+    await ctx.setSinkId(speaker ? speaker.deviceId : '');
+  } catch (err) {
+    if (speaker) setStatus(`Could not play through Krisp (${err.message}); using the speakers directly.`);
+  }
+}
+
 /**
  * The headset: the real device behind Windows' default microphone. Asked for by its exact id,
  * because a generic request ("any microphone") is what extensions such as Background Noise Remover
@@ -205,6 +238,7 @@ function setMicSourceButton() {
   btn.textContent = !krisp && micSource === 'camera' ? 'Use headset' : 'Not Headset';
   $('krispRow').hidden = !krispPresent;
   $('useKrisp').checked = useKrisp;
+  setKrispSpeakerRow();
 }
 
 /** Reopens the call's microphone with the current choice (Krisp switched on/off, or appeared/gone). */
@@ -218,6 +252,9 @@ async function refreshKrisp() {
   setMicSourceButton();
   const track = audio?.stream?.getAudioTracks()[0];
   if (track && audio.input && KRISP_LABEL.test(track.label) !== krispActive()) await reopenMic();
+  krispSpeakerPresent = !!(await krispSpeaker());
+  if (audio?.ctx) await applyOutputSink(audio.ctx); // Krisp Speaker appearing or disappearing mid-call
+  setKrispSpeakerRow();
 }
 
 /**
@@ -577,6 +614,7 @@ async function startCall(callId, caller, startMuted = false, { seq = 0, got = 0 
     if (mine.reported) reportSound(mine); // a change after the first report
   };
   ctx.resume().catch(() => {});
+  applyOutputSink(ctx);
   setTimeout(() => soundBlocked(mine), 1000);
   setTimeout(() => reportSound(mine), 5000); // by then the speakers and microphone have shown whether they work
   try {
@@ -828,6 +866,11 @@ $('useKrisp').addEventListener('change', () => {
   storage.set(useKrisp ? '' : 'off', KRISP_KEY);
   setMicSourceButton();
   reopenMic();
+});
+$('useKrispSpeaker').addEventListener('change', () => {
+  useKrispSpeaker = $('useKrispSpeaker').checked;
+  storage.set(useKrispSpeaker ? 'on' : '', KRISP_SPEAKER_KEY);
+  if (audio?.ctx) applyOutputSink(audio.ctx);
 });
 navigator.mediaDevices?.addEventListener('devicechange', () => refreshKrisp());
 setMicSourceButton();
