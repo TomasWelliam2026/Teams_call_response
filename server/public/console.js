@@ -51,16 +51,16 @@ async function pollHealth() {
     const res = await fetch('/healthz');
     if (!res.ok) throw new Error(String(res.status));
     const health = await res.json();
-    $('serverHealth').textContent = 'Server: reachable.';
+    $('serverHealth').textContent = 'Reachable.';
     $('serverHealth').dataset.ok = 'true';
     $('extensionHealth').textContent = health.teamsComputers
-      ? `Teams extension: connected${health.teamsComputers > 1 ? ` (${health.teamsComputers})` : ''}.`
-      : 'Teams extension: not connected.';
+      ? `Teams extension connected${health.teamsComputers > 1 ? ` (${health.teamsComputers})` : ''}.`
+      : 'Teams extension not connected.';
     $('extensionHealth').dataset.ok = health.teamsComputers ? 'true' : 'false';
   } catch {
-    $('serverHealth').textContent = 'Server: unreachable.';
+    $('serverHealth').textContent = 'Unreachable.';
     $('serverHealth').dataset.ok = 'false';
-    $('extensionHealth').textContent = 'Teams extension: unknown (server unreachable).';
+    $('extensionHealth').textContent = 'Teams extension status unknown: server unreachable.';
     $('extensionHealth').dataset.ok = 'false';
   }
 }
