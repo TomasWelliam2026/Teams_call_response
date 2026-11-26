@@ -248,6 +248,29 @@
     return !!(micButton() || cameraButton() || document.querySelector('[data-tid="myself-video-more-menu"]'));
   }
 
+  /** The app pressed "End call": actually hang up here, not just hand the bridge back. The bridge
+   * normally ends when Teams closes the call's connection; Teams can keep that connection open after
+   * leaving, so once the Leave button has gone the bridge ends anyway. What's still on gets a note. */
+  const HANG_UP_CHECK_MS = 5000;
+  function hangUp(callId) {
+    const button = hangupButton();
+    if (!button) {
+      bridgePort?.postMessage({ type: 'note', message: `The app pressed End call, but there's no Leave/Hang up button in this ${window === top ? 'page' : 'frame'} (${location.host}) to press: the call is still on in Teams.` });
+      return;
+    }
+    const label = (button.getAttribute('aria-label') || button.getAttribute('data-tid') || 'Leave').trim().slice(0, 40);
+    button.click();
+    setTimeout(() => {
+      if (bridgeCallId !== callId) return; // ended as usual
+      if (hangupButton()) {
+        bridgePort?.postMessage({ type: 'note', message: `The app pressed End call and Teams' "${label}" button was pressed, but the call is still on in Teams ${HANG_UP_CHECK_MS / 1000} s later.` });
+        return;
+      }
+      bridgePort?.postMessage({ type: 'note', message: `Teams left the call for the app's End call but kept its media connection open: ending the bridge.` });
+      pagePort.postMessage({ type: 'stop', callId, reason: 'Call ended.' });
+    }, HANG_UP_CHECK_MS);
+  }
+
   /** Best effort; unlike a ring toast, there's no caller name to read off a meeting someone joined.
    * Teams' title is "<unread prefix><view name> | <content name> | Microsoft Teams" (e.g.
    * "(1) Chat | Meeting with Jason ChanMing | Microsoft Teams"); the content name - what we want -
@@ -312,8 +335,7 @@
         // Camera control (see page-audio.js): just relay the signaling, opaque here.
         pagePort.postMessage({ ...msg, callId });
       } else if (msg.type === 'end-call') {
-        // The app pressed "End call": actually hang up here, not just hand the bridge back.
-        hangupButton()?.click();
+        hangUp(callId);
       }
     });
     // A deliberate end arrives as 'stop' first (bridgeCallId is cleared then). Without one, the

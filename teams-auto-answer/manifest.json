@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teams Call Answerer",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "Links Teams web to your Safe Job server, so calls ring, are answered and are talked on from the Safe Job app.",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "tabs", "sidePanel", "alarms"],

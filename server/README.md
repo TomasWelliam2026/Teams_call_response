@@ -21,6 +21,8 @@ What the server does with a call:
   **Hand back to Teams computer** stops the bridge only; the call keeps going and the person at the
   Teams computer gets it back. **End call** instead actually hangs up on the Teams computer too — it
   presses Teams' own Leave button there, so the call ends for everyone, not just for the bridge.
+  The call only ends here once the Teams computer confirms it hung up; if that doesn't come within
+  15 s, the log says the call is still on there and it shows in the app again.
 - **Nobody takes it.** `FALLBACK=silence` (default) sends silence. `FALLBACK=echo` plays the caller's
   own audio back, which is useful for testing.
 

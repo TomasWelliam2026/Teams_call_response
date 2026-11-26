@@ -69,7 +69,9 @@ the meeting was joined.
 - **Take full control (camera)** in the app puts that computer's camera into the call in place of this
   one's, and turns Teams' Camera button on (and back off, if the extension turned it on).
 - **End call** in the app presses Teams' Leave/Hang up here; **Hand back to Teams computer** only stops
-  the bridge, and this computer's microphone goes back into the call.
+  the bridge, and this computer's microphone goes back into the call. If the Leave button has gone 5 s
+  later but Teams kept the call's connection open, the bridge ends anyway; if the call is still on (or
+  there was no button to press), the server log says so.
 
 The bridge stops, and Teams gets its microphone back, when the call ends or the app hands it back.
 Connection drops of up to a minute, including a server restart, don't lose any audio: the last minute is
