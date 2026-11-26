@@ -183,6 +183,7 @@ async function applyOutputSink(ctx) {
   if (!ctx.setSinkId) return; // older Chromium: stays on the default device
   const found = await krispSpeaker();
   krispSpeakerPresent = !!found;
+  setKrispSpeakerRow(); // device labels (and so presence) may only become known once a call has opened a mic
   const speaker = useKrispSpeaker ? found : null;
   try {
     await ctx.setSinkId(speaker ? speaker.deviceId : '');
