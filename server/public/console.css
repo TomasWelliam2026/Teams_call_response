@@ -1,44 +1,100 @@
+/* Call Bridge console — read as a one-line telephone switchboard panel: lamps for status, a
+   patch-code field for the token, real toggle switches, and one copper tally light on the live
+   call. Tokens match operator-shell's own panel (preload.js) so the two feel like one product. */
 :root {
-  --bg: #f6f7f9; --fg: #1f1f1f; --muted: #5f6368; --line: #dadce0; --card: #fff;
-  --accent: #188038; --danger: #c5221f;
+  --bg: #eef0ec; --card: #ffffff; --fg: #15171a; --muted: #5b6269; --line: #d7dbe0; --field: #f4f5f7;
+  --green: #1f8a4c; --amber: #e8a33d; --danger: #c0392b; --live: #b5651d;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root { --bg: #202124; --fg: #e8eaed; --muted: #9aa0a6; --line: #3c4043; --card: #2a2b2e; --accent: #34a853; --danger: #f28b82; }
+  :root {
+    --bg: #0e0f11; --card: #15171a; --fg: #eceeef; --muted: #868d95; --line: #2c3036; --field: #121417;
+    --green: #3fae6a; --amber: #e8a33d; --danger: #d8574b; --live: #d98a4a;
+  }
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; }
-main { max-width: 560px; margin: 0 auto; padding: 24px 16px; }
-h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 24px 0 8px; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+main { max-width: 480px; margin: 0 auto; padding: 20px 16px 32px; }
+
+.top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+h1 { font: 600 19px/1.2 var(--sans); margin: 0; letter-spacing: -.01em; }
 .muted { color: var(--muted); }
-label { display: block; margin: 16px 0 4px; }
+
+/* A section label reads as a panel divider, not a decorative eyebrow: a rule the text sits on. */
+h2 {
+  font: 12px/1.2 var(--mono); color: var(--muted); margin: 22px 0 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ---- Lamps: every status line is a dot (currentColor) plus plain-language text ---- */
+.stations, .mic {
+  display: flex; align-items: center; gap: 8px; margin: 2px 0; color: var(--muted); font: 13px/1.4 var(--mono);
+}
+.stations::before, .mic::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none;
+}
+.stations[data-ok=true], .mic[data-ok=true] { color: var(--green); }
+.stations[data-ok=false], .mic[data-ok=false] { color: var(--danger); font-weight: 600; }
+.mic:empty { display: none; }
+#serverAddress { font: 13px/1.4 var(--mono); color: var(--muted); margin: 10px 0 2px; }
+.status { color: var(--muted); min-height: 1.5em; font: 13px var(--sans); margin: 10px 0; }
+
+/* ---- Form controls: flat, small radius, bordered — panel switchgear, not SaaS chrome ---- */
+label { display: block; margin: 16px 0 4px; font: 12px var(--mono); color: var(--muted); }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
-input { flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
-button { font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+input {
+  flex: 1; min-width: 0; font: 14px/1.3 var(--mono); padding: 8px 10px; border-radius: 3px;
+  border: 1px solid var(--line); background: var(--field); color: var(--fg);
+}
+input:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+button {
+  font: 13px var(--mono); padding: 8px 12px; border-radius: 3px; border: 1px solid var(--line);
+  background: var(--card); color: var(--fg); cursor: pointer;
+}
 button:hover { border-color: var(--muted); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.danger { color: var(--danger); }
+button:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+button:disabled { opacity: .5; cursor: default; }
+button.primary { background: var(--green); border-color: var(--green); color: #fff; }
+button.danger { color: var(--danger); border-color: var(--danger); }
 button[aria-pressed=true] { background: var(--danger); border-color: var(--danger); color: #fff; }
-.status { color: var(--muted); min-height: 1.5em; }
-.mic { margin: 0; }
-.mic[data-ok=true] { color: var(--accent); }
-.mic[data-ok=false] { color: var(--danger); font-weight: 600; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-.card.live { border-color: var(--accent); }
+button[aria-pressed=true]#camera { background: var(--green); border-color: var(--green); }
+button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; font: 13px var(--sans); }
+
+select {
+  appearance: none; font: 13px var(--mono); padding: 7px 28px 7px 10px; border-radius: 3px;
+  border: 1px solid var(--line); background-color: var(--field); color: var(--fg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235b6269'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 10px center;
+}
+select:disabled { opacity: .5; }
+
+/* Real toggle switches, standing in for checkboxes — matches the app's own Start-at-login switch. */
+label.check { display: flex; gap: 10px; align-items: center; margin-top: 10px; font: 14px var(--sans); color: var(--fg); }
+label.check input[type=checkbox] {
+  appearance: none; width: 34px; height: 20px; flex: none; margin: 0; position: relative; cursor: pointer;
+  border-radius: 999px; border: 1px solid var(--line); background: var(--field); transition: background .15s ease;
+}
+label.check input[type=checkbox]::before {
+  content: ""; position: absolute; top: 1px; left: 1px; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--card); box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .15s ease;
+}
+label.check input[type=checkbox]:checked { background: var(--green); border-color: var(--green); }
+label.check input[type=checkbox]:checked::before { transform: translateX(14px); }
+label.check input[type=checkbox]:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+
+/* ---- Panels ---- */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 12px; }
+.card.ring { border-color: var(--amber); }
+.card.ring .row { margin-top: 0; }
+/* The one bold accent in the whole page: a tally light down the side of the call actually live. */
+.card.live { border-color: var(--line); border-left: 3px solid var(--live); padding-left: 11px; }
+#activeCaller { font: 15px/1.3 var(--mono); }
+#activeClock, #micSource, #cameraStatus { font: 13px var(--mono); color: var(--muted); }
+
 .calls { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .calls li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-label.check { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
-label.check input { flex: none; }
-.stations { margin: 0 0 4px; }
-.stations[data-ok=true] { color: var(--accent); }
-.stations[data-ok=false] { color: var(--danger); font-weight: 600; }
-.card.ring { border-color: var(--accent); border-width: 2px; flex-wrap: wrap; }
-.card.ring .row { margin-top: 0; }
-button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; }
-button:disabled { opacity: .55; cursor: default; }
-button[aria-pressed=true]#camera { background: var(--accent); border-color: var(--accent); color: #fff; }
-.preview[hidden] { display: none; }
-.preview { margin-top: 10px; width: 100%; max-width: 240px; border-radius: 8px; background: #000; display: block; }
 
+.preview[hidden] { display: none; }
+.preview { margin-top: 10px; width: 100%; max-width: 240px; border-radius: 4px; background: #000; display: block; border: 1px solid var(--line); }
