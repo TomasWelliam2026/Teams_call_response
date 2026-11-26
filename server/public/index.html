@@ -10,6 +10,18 @@
   <link rel="stylesheet" href="console.css">
 </head>
 <body>
+  <!-- One icon set, defined once, used by <use href="#ic-…">: thin-line glyphs matching the panel's
+       stroke weight, each tied to a specific action rather than decorating the page. -->
+  <svg hidden aria-hidden="true">
+    <symbol id="ic-mic" viewBox="0 0 20 20"><path d="M10 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M5 10v1a5 5 0 0 0 10 0v-1"/><path d="M10 16v2"/><path d="M7 18h6"/></symbol>
+    <symbol id="ic-mic-off" viewBox="0 0 20 20"><path d="M7 5v4m0 3v1a3 3 0 0 0 4.6 2.55"/><path d="M13 9V5a3 3 0 0 0-3-3 3 3 0 0 0-2.2.95"/><path d="M5 10v1a5 5 0 0 0 7.5 4.33"/><path d="M15 10v1a5 5 0 0 1-.45 2.08"/><path d="M10 16v2"/><path d="M7 18h6"/><path d="M3 3l14 14"/></symbol>
+    <symbol id="ic-headset" viewBox="0 0 20 20"><path d="M3 11a7 7 0 0 1 14 0v4"/><rect x="2" y="11" width="3" height="5" rx="1"/><rect x="15" y="11" width="3" height="5" rx="1"/><path d="M17 16v1a2 2 0 0 1-2 2h-2"/></symbol>
+    <symbol id="ic-camera" viewBox="0 0 20 20"><rect x="2" y="6" width="11" height="9" rx="2"/><path d="M13 9l5-3v9l-5-3"/></symbol>
+    <symbol id="ic-release" viewBox="0 0 20 20"><path d="M10 3v8"/><path d="M6 7l4-4 4 4"/><path d="M4 13v2a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="ic-handback" viewBox="0 0 20 20"><path d="M8 4 3 9l5 5"/><path d="M3 9h9a5 5 0 0 1 5 5v2"/></symbol>
+    <symbol id="ic-hangup" viewBox="0 0 20 20"><path d="M3 5c0 7 5 12 12 12l2-3-4-3-2 2a9 9 0 0 1-5-5l2-2-3-4z"/><path d="M3 3l14 14"/></symbol>
+    <symbol id="ic-logout" viewBox="0 0 20 20"><path d="M8 3H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h3"/><path d="M12 14l4-4-4-4"/><path d="M16 10H8"/></symbol>
+  </svg>
   <main>
     <header class="top">
       <h1>Call Bridge</h1>
@@ -51,15 +63,15 @@
         <div class="card live">
           <strong id="activeCaller"></strong> <span id="activeClock" class="muted"></span>
           <div class="row">
-            <button id="mute">Mute</button>
-            <button id="notHeadset" aria-pressed="false" title="Talk through the camera's microphone instead of the headset (e.g. when you take the headset off)">Not Headset</button>
-            <button id="release" title="Stop hearing this call; the caller stays connected">Release</button>
-            <button id="handBack" title="Stop the bridge; the person at the Teams computer gets the call back">Hand back to Teams computer</button>
-            <button id="endCall" class="danger" title="Hang up the call on the Teams computer too, not just release the bridge">End call</button>
+            <button id="mute"><svg class="ic"><use href="#ic-mic"/></svg><span class="label">Mute</span></button>
+            <button id="notHeadset" aria-pressed="false" title="Talk through the camera's microphone instead of the headset (e.g. when you take the headset off)"><svg class="ic"><use href="#ic-headset"/></svg><span class="label">Not Headset</span></button>
+            <button id="release" title="Stop hearing this call; the caller stays connected"><svg class="ic"><use href="#ic-release"/></svg>Release</button>
+            <button id="handBack" title="Stop the bridge; the person at the Teams computer gets the call back"><svg class="ic"><use href="#ic-handback"/></svg>Hand back to Teams computer</button>
+            <button id="endCall" class="danger" title="Hang up the call on the Teams computer too, not just release the bridge"><svg class="ic"><use href="#ic-hangup"/></svg>End call</button>
           </div>
           <p id="micSource" class="muted"></p>
           <div class="row">
-            <button id="camera" title="Send this computer's camera into the call instead of the Teams computer's">Take full control (camera)</button>
+            <button id="camera" title="Send this computer's camera into the call instead of the Teams computer's"><svg class="ic"><use href="#ic-camera"/></svg><span class="label">Take full control (camera)</span></button>
             <span id="cameraStatus" class="muted"></span>
           </div>
           <div class="row">
@@ -82,7 +94,7 @@
         <ul id="calls" class="calls"></ul>
       </section>
 
-      <p><button id="signOut" class="link">Sign out</button></p>
+      <p><button id="signOut" class="link"><svg class="ic"><use href="#ic-logout"/></svg>Sign out</button></p>
     </div>
   </main>
   <script src="background-effect.js"></script>

@@ -50,9 +50,11 @@ input {
 }
 input:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
 button {
-  font: 13px var(--mono); padding: 8px 12px; border-radius: 3px; border: 1px solid var(--line);
-  background: var(--card); color: var(--fg); cursor: pointer;
+  display: inline-flex; align-items: center; gap: 7px; font: 13px var(--mono); padding: 8px 12px;
+  border-radius: 3px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer;
 }
+.ic { width: 15px; height: 15px; flex: none; stroke: currentColor; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+button.link .ic { width: 14px; height: 14px; }
 button:hover { border-color: var(--muted); }
 button:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
 button:disabled { opacity: .5; cursor: default; }

@@ -72,7 +72,8 @@ setInterval(pollHealth, HEALTH_POLL_MS);
 function setMuted(value) {
   muted = !!value;
   $('mute').setAttribute('aria-pressed', muted);
-  $('mute').textContent = muted ? 'Unmute' : 'Mute';
+  $('mute').querySelector('use').setAttribute('href', muted ? '#ic-mic-off' : '#ic-mic');
+  $('mute').querySelector('.label').textContent = muted ? 'Unmute' : 'Mute';
   if (active) setStatus(muted ? `Muted — ${active.caller} can't hear you.` : `Talking to ${active.caller}.`);
 }
 
@@ -236,7 +237,7 @@ function setMicSourceButton() {
   btn.disabled = krisp;
   btn.title = krisp ? 'Krisp is in use: choose the headset or camera microphone in the Krisp app' : NOT_HEADSET_TITLE;
   btn.setAttribute('aria-pressed', !krisp && micSource === 'camera');
-  btn.textContent = !krisp && micSource === 'camera' ? 'Use headset' : 'Not Headset';
+  btn.querySelector('.label').textContent = !krisp && micSource === 'camera' ? 'Use headset' : 'Not Headset';
   $('krispRow').hidden = !krispPresent;
   $('useKrisp').checked = useKrisp;
   setKrispSpeakerRow();
@@ -723,7 +724,7 @@ function endCall(message) {
 
 function setCameraButton() {
   $('camera').setAttribute('aria-pressed', !!camera);
-  $('camera').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
+  $('camera').querySelector('.label').textContent = camera ? 'Stop camera' : 'Take full control (camera)';
   // A background chosen here only ever reaches the caller through this computer's own camera (see
   // startCamera): disabled otherwise, so picking one while Teams still carries the call doesn't look
   // like a silent no-op.
