@@ -106,9 +106,11 @@ inserted, when its window is asked for, and again after it loads. It does nothin
 (`MediaStreamTrackProcessor`), resamples it to 16 kHz, and swaps the outgoing microphone track
 (`RTCRtpSender.replaceTrack`) for one that plays the server audio (`MediaStreamTrackGenerator`, which needs
 no click in the page), on every connection of the call, including ones Teams adds mid-call. When Teams
-moves a call to another media server, it briefly carries the same audio on two connections; the extension
-recognizes the copies by their loudness pattern and plays them once, switching to the new connection
-during a pause, so nothing is doubled or cut. What it notices is sent to the server log, including
+moves a call to another media server, it briefly carries the same audio on two connections, and it can
+bring the caller in on two tracks of one connection; the extension recognizes the copies by their loudness
+pattern, up to 1 s apart, and plays them once, switching to the newer copy during a pause, so nothing is
+doubled or cut. Copies more than 300 ms apart must match for 3 s first, so two different voices are never
+taken for one. What it notices is sent to the server log, including each extra audio track it reads,
 a connection Teams adds to the call (and where it was made) and Teams renegotiating a connection so
 that it no longer brings the caller's audio in. If the caller's
 audio stops reaching it for 2 s while the call goes on, it logs what the call's audio looks like at that

@@ -388,6 +388,7 @@
       engine.tick();
     }, (message) => post({ type: 'note', message }));
     let lastAudioAt = Date.now();
+    let tracksSeen = 0; // caller audio tracks read so far: every one after the first gets a note in the log
     let stalledSince = 0; // set while the caller's audio has stopped arriving (see checkStall)
     const injected = new Map(); // sender -> original track
     const peers = new Set();
@@ -582,7 +583,10 @@
         if (!peers.has(pc) && peers.size) post({ type: 'note', message: `Teams added connection #${pcNumber.get(pc)} to the call, made in ${madeIn.get(pc)}.` });
         noteReceiving(pc);
         peers.add(pc);
-        remoteAudio(pc).forEach(t => receiver.add(t));
+        for (const t of remoteAudio(pc)) {
+          if (!receiver.add(t) || !tracksSeen++) continue;
+          post({ type: 'note', message: `Connection #${pcNumber.get(pc)} brought in another audio track; reading ${receiver.size} of the caller's tracks (${remoteAudio(pc).length} on this connection). Ones that carry the same audio are played once, the rest are mixed.` });
+        }
         audioSenders(pc).forEach(t => inject(t, engine.outTrack, isConnected(pc)));
       }
       receiver.prune(); // closing a connection ends its tracks without an 'ended' event
@@ -704,9 +708,13 @@
   const STALL_MS = 150;          // a track that delivered nothing for this long has stalled
   const HISTORY = 150;           // loudness kept per track: 150 x 20 ms = 3 s
   const MIN_COMPARE = 50;        // a track needs 1 s of loudness history before it's compared
-  const MAX_LAG = 15;            // copies may be up to 15 x 20 ms = 300 ms apart
+  const MAX_LAG = 50;            // copies may be up to 50 x 20 ms = 1 s apart (300 ms let a later copy through: the caller heard twice)
+  const NEAR_LAG = 15;           // copies up to 300 ms apart are merged at the first match ...
+  const CONFIRM = 15;            // ... further apart only after this many matches in a row at that lag (3 s of
+                                 // new audio): over a 1 s range, two different voices can match by chance once
   const MIN_OVERLAP = 40;
   const SAME_AUDIO = 0.9;        // loudness patterns this alike (correlation) are copies of one audio
+  const ALIKE_NOTE = 0.75;       // two tracks both being played that are this alike get a note in the log (different voices reach ~0.65)
   const MIN_SPREAD = 0.25;       // a pattern flatter than this (log10 loudness) has no speech to compare
   const COMPARE_EVERY = 10;      // frames (200 ms)
   const SPEECH_RMS = 0.02;
@@ -720,11 +728,14 @@
     const sources = new Map(); // MediaStreamTrack -> source (see add)
     const playing = new Map(); // group -> the source being played for that group of copies
     const pending = new Map(); // group -> { to, since }: a newer copy waiting for a pause to take over
+    const noted = new Set();   // "n/n" pairs of tracks already reported as alike but both played
+    const candidates = new Map(); // "n/n" -> { lag, hits }: tracks far apart that matched, not yet confirmed
     let order = 0;
     let frames = 0;
 
+    /** Starts reading a track; true if it wasn't being read already. */
     function add(track) {
-      if (sources.has(track) || track.readyState !== 'live') return;
+      if (sources.has(track) || track.readyState !== 'live') return false;
       // Keeps Chrome decoding the track even after Teams stops playing it (an old connection),
       // so a copy never goes silent before the switch to the next one.
       const el = new Audio();
@@ -740,10 +751,12 @@
         sq: 0, sqN: 0,   // the 20 ms of loudness being measured
         lastData: 0,
         speech: 0,       // frames in a row this unplayed copy had speech the played one didn't
+        ahead: 0,        // frames this copy is ahead of the first copy in its group
       };
       sources.set(track, s);
       track.addEventListener('ended', () => drop(track), { once: true });
       read(s);
+      return true;
     }
 
     function drop(track) {
@@ -864,10 +877,16 @@
     function checkStillCopy(s, now) {
       const played = playing.get(s.group);
       if (!played || played === s || !live(s, now)) return;
-      const recent = played.env.slice(-(2 * MAX_LAG + 1));
-      s.speech = nextRms(s) > SPEECH_RMS && Math.max(0, ...recent) < QUIET_RMS * 2 ? s.speech + 1 : 0;
+      // The same moment in both: a copy ahead by d frames said d frames ago what the played one says now.
+      const d = s.ahead - played.ahead;
+      const said = s.env[s.env.length - 1 - Math.max(0, d)];
+      const at = played.env.length - 1 - Math.max(0, -d);
+      if (said === undefined || at < 0) return;
+      const around = played.env.slice(Math.max(0, at - NEAR_LAG), at + NEAR_LAG + 1);
+      s.speech = said > SPEECH_RMS && Math.max(0, ...around) < QUIET_RMS * 2 ? s.speech + 1 : 0;
       if (s.speech < 3) return;
       s.group = ++order;
+      s.ahead = 0;
       s.speech = 0;
       note('Two connections that seemed to carry the same audio differ after all: playing both.');
     }
@@ -881,14 +900,29 @@
           const b = ready[j];
           if (a.group === b.group) continue;
           const m = similarity(a.env, b.env);
-          if (!m || m.corr < SAME_AUDIO) continue;
+          const key = `${a.n}/${b.n}`;
+          if (m && m.corr >= ALIKE_NOTE && m.corr < SAME_AUDIO && !noted.has(key)) {
+            noted.add(key);
+            note(`Playing two of the caller's audio tracks together that sound alike (match ${m.corr.toFixed(2)}, ${Math.abs(m.lag) * 20} ms apart): if the caller was heard twice, this is why.`);
+          }
+          if (!m || m.corr < SAME_AUDIO) { candidates.delete(key); continue; }
+          if (Math.abs(m.lag) > NEAR_LAG) {
+            const c = candidates.get(key);
+            const hits = c && Math.abs(c.lag - m.lag) <= 1 ? c.hits + 1 : 1;
+            candidates.set(key, { lag: m.lag, hits });
+            if (hits < CONFIRM) continue;
+          }
+          candidates.delete(key);
           const keep = Math.min(a.group, b.group);
           const gone = Math.max(a.group, b.group);
-          for (const s of sources.values()) if (s.group === gone) s.group = keep;
+          // a[i] matches b[i + lag]: b says it lag frames later, so a is lag frames ahead of b.
+          const [from, ahead] = a.group === gone ? [a, b.ahead + m.lag] : [b, a.ahead - m.lag];
+          const shift = ahead - from.ahead;
+          for (const s of sources.values()) if (s.group === gone) { s.group = keep; s.ahead += shift; }
           // Until the switch at a pause, play the copy the older group was playing.
           if (!playing.has(keep) && playing.has(gone)) playing.set(keep, playing.get(gone));
           playing.delete(gone);
-          note(`Teams carried the same audio on two connections (${Math.abs(m.lag) * 20} ms apart): playing it once.`);
+          note(`Teams brought the same audio in twice (${Math.abs(m.lag) * 20} ms apart): playing it once.`);
         }
       }
     }
@@ -919,10 +953,12 @@
       /** For a stall report: each track being read, how long since it delivered audio, its player. */
       describe() {
         const now = performance.now();
-        return [...sources.values()].map(s => `${s.track.readyState}${s.track.muted ? ' muted' : ''}, `
+        return [...sources.values()].map(s => `track ${s.n} ${s.track.readyState}${s.track.muted ? ' muted' : ''}, `
           + `${s.lastData ? `last audio ${((now - s.lastData) / 1000).toFixed(1)} s ago` : 'never delivered'}, `
           + `own player ${s.el.paused ? 'paused' : 'playing'}`).join('; ') || 'no tracks';
       },
+      /** How many of the caller's tracks are being read. */
+      get size() { return sources.size; },
       prune() { for (const track of [...sources.keys()]) if (track.readyState === 'ended') drop(track); },
       close() { for (const track of [...sources.keys()]) drop(track); },
     };
