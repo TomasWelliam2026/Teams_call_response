@@ -21,6 +21,8 @@ function Build-Zip([string]$zipPath, [bool]$withConfig) {
   Copy-Item $src $dest -Recurse
   Remove-Item (Join-Path $dest 'test') -Recurse -Force
   Remove-Item (Join-Path $dest '.gitignore') -Force -ErrorAction SilentlyContinue
+  # Archives kept in the folder (e.g. a copy of the extension) aren't part of the extension.
+  Get-ChildItem $dest -Include *.zip, *.rar, *.7z -Recurse | Remove-Item -Force
   if (-not $withConfig) { Remove-Item (Join-Path $dest 'bridge-config.json') -Force -ErrorAction SilentlyContinue }
   if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
   Compress-Archive -Path $dest -DestinationPath $zipPath
